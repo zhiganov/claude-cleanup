@@ -381,6 +381,170 @@ Collect: browser names, sizes, paths.
 
 ---
 
+#### Category: Electron App Caches (Windows only)
+
+**Skip if platform is not windows.**
+
+Electron apps store caches in `%APPDATA%/<AppName>/` and `%LOCALAPPDATA%/<AppName>/`. Scan for `Cache/`, `Code Cache/`, `GPUCache/`, and `Service Worker/CacheStorage/` subdirectories inside known Electron app directories.
+
+Write a PowerShell temp script to `/tmp/claude-cleanup/electroncache.ps1`:
+```powershell
+$apps = @(
+    @{ Name = "Claude Desktop"; Path = "$env:APPDATA\Claude" },
+    @{ Name = "Miro"; Path = "$env:APPDATA\RealtimeBoard" },
+    @{ Name = "Slack"; Path = "$env:APPDATA\Slack" },
+    @{ Name = "Discord"; Path = "$env:APPDATA\discord" },
+    @{ Name = "Linear"; Path = "$env:APPDATA\Linear" },
+    @{ Name = "Notion"; Path = "$env:APPDATA\Notion" },
+    @{ Name = "Notion Calendar"; Path = "$env:APPDATA\Notion Calendar" },
+    @{ Name = "Signal"; Path = "$env:APPDATA\Signal" },
+    @{ Name = "Element"; Path = "$env:APPDATA\Element" },
+    @{ Name = "Figma"; Path = "$env:APPDATA\Figma" },
+    @{ Name = "Zoom"; Path = "$env:APPDATA\Zoom" },
+    @{ Name = "Telegram"; Path = "$env:APPDATA\Telegram Desktop" },
+    @{ Name = "Tana"; Path = "$env:LOCALAPPDATA\tana" },
+    @{ Name = "TogglTrack"; Path = "$env:LOCALAPPDATA\TogglTrack" }
+)
+$cacheDirNames = @("Cache", "Code Cache", "GPUCache", "cache", "blob_storage")
+
+foreach ($app in $apps) {
+    if (-not (Test-Path $app.Path)) { continue }
+    $totalSize = 0
+    $paths = @()
+    foreach ($cacheName in $cacheDirNames) {
+        # Search recursively but only 2 levels deep
+        Get-ChildItem $app.Path -Directory -Filter $cacheName -Recurse -Depth 2 -ErrorAction SilentlyContinue | ForEach-Object {
+            $s = (Get-ChildItem $_.FullName -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+            if ($s -gt 1MB) {
+                $totalSize += $s
+                $paths += $_.FullName
+            }
+        }
+    }
+    # Also check for Service Worker/CacheStorage
+    $swPath = Join-Path $app.Path "Service Worker\CacheStorage"
+    if (Test-Path $swPath) {
+        $s = (Get-ChildItem $swPath -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+        if ($s -gt 1MB) {
+            $totalSize += $s
+            $paths += $swPath
+        }
+    }
+    if ($totalSize -gt 10MB) {
+        $mb = [math]::Round($totalSize / 1MB)
+        Write-Output "$($app.Name)|$mb|$($paths -join ';')"
+    }
+}
+```
+
+Run: `powershell.exe -File "$(cygpath -w /tmp/claude-cleanup/electroncache.ps1)"`
+
+Parse output. Each line is: `appName|sizeMB|semicolonSeparatedPaths`
+
+Skip if total across all apps < 50 MB.
+
+**IMPORTANT:** Warn the user to close the affected apps before cleaning for best results. Files locked by running apps will be skipped automatically.
+
+Clean command (Step 6): `rm -rf <each cache directory path>/*` (delete contents, not the directory itself — apps recreate cache dirs on next launch).
+
+Collect: app names, sizes, paths.
+
+---
+
+#### Category: Stale Updater Files (Windows only)
+
+**Skip if platform is not windows.**
+
+Electron apps using Squirrel or similar updaters keep downloaded update packages in `pending/` and `updates/` directories after they've been applied.
+
+Write a PowerShell temp script to `/tmp/claude-cleanup/staleupdaters.ps1`:
+```powershell
+$updaterPaths = @(
+    @{ Name = "Linear"; Path = "$env:LOCALAPPDATA\@lineardesktop-updater\pending" },
+    @{ Name = "Notion"; Path = "$env:LOCALAPPDATA\notion-updater\pending" },
+    @{ Name = "uTorrent"; Path = "$env:APPDATA\uTorrent\updates" },
+    @{ Name = "Signal"; Path = "$env:APPDATA\Signal\update-cache" }
+)
+
+foreach ($u in $updaterPaths) {
+    if (Test-Path $u.Path) {
+        $s = (Get-ChildItem $u.Path -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+        if ($s -gt 5MB) {
+            Write-Output "$($u.Name)|$([math]::Round($s / 1MB))|$($u.Path)"
+        }
+    }
+}
+
+# Also scan for any Squirrel app packages/ directories with old .nupkg files
+Get-ChildItem "$env:LOCALAPPDATA" -Directory -ErrorAction SilentlyContinue | Where-Object {
+    Test-Path (Join-Path $_.FullName "Update.exe")
+} | ForEach-Object {
+    $pkgDir = Join-Path $_.FullName "packages"
+    if (Test-Path $pkgDir) {
+        # Keep only the newest .nupkg, measure the rest
+        $nupkgs = Get-ChildItem $pkgDir -Filter "*.nupkg" -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime
+        if ($nupkgs.Count -gt 1) {
+            $old = $nupkgs | Select-Object -SkipLast 1
+            $s = ($old | Measure-Object -Property Length -Sum).Sum
+            if ($s -gt 5MB) {
+                $paths = ($old | ForEach-Object { $_.FullName }) -join ';'
+                Write-Output "$($_.Name) (old packages)|$([math]::Round($s / 1MB))|$paths"
+            }
+        }
+    }
+}
+```
+
+Run: `powershell.exe -File "$(cygpath -w /tmp/claude-cleanup/staleupdaters.ps1)"`
+
+Parse output. Each line is: `appName|sizeMB|pathOrPaths`
+
+Skip if total < 20 MB.
+
+Clean command (Step 6): `rm -rf <each path>/*` for directories, or `rm -f <each file path>` for individual .nupkg files.
+
+Collect: app names, sizes, paths.
+
+---
+
+#### Category: Playwright Browsers (Windows only)
+
+**Skip if platform is not windows.**
+
+Playwright downloads full browser binaries to `%LOCALAPPDATA%\ms-playwright\`. These can be large (200-400 MB each) and accumulate when Playwright updates.
+
+Write a PowerShell temp script to `/tmp/claude-cleanup/playwright.ps1`:
+```powershell
+$p = "$env:LOCALAPPDATA\ms-playwright"
+if (Test-Path $p) {
+    $dirs = Get-ChildItem $p -Directory -ErrorAction SilentlyContinue
+    $totalSize = 0
+    $names = @()
+    foreach ($d in $dirs) {
+        $s = (Get-ChildItem $d.FullName -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+        $totalSize += $s
+        $names += "$($d.Name) ($([math]::Round($s / 1MB))MB)"
+    }
+    Write-Output "$([math]::Round($totalSize / 1MB))|$($names -join ',')|$p"
+} else {
+    Write-Output "0||"
+}
+```
+
+Run: `powershell.exe -File "$(cygpath -w /tmp/claude-cleanup/playwright.ps1)"`
+
+Parse output: `totalMB|browserList|path`
+
+Skip if total < 50 MB.
+
+**Note:** Deleting Playwright browsers means they'll need to be re-downloaded on next `npx playwright install`. Only clean if you're not actively running Playwright tests.
+
+Clean command (Step 6): `rm -rf <ms-playwright path>/*`
+
+Collect: total size, browser list, path.
+
+---
+
 #### Category: App Caches (macOS + Linux only)
 
 **Skip on Windows** (other Windows-specific categories cover app bloat).
@@ -453,6 +617,9 @@ For each selected category, execute the appropriate cleanup:
 | Delivery Optimization | PowerShell: `Stop-Service DoSvc -Force; Remove-Item "$env:SystemDrive\ProgramData\Microsoft\Windows\DeliveryOptimization\Cache\*" -Recurse -Force; Start-Service DoSvc`. If access denied, instruct user to use Settings > Storage > Temporary files. |
 | Windows Temp files | PowerShell: `Remove-Item "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item "$env:SystemRoot\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue` |
 | Browser caches | `rm -rf <each cache directory path>/*` (contents only, not the directory). Warn user to close browsers first. |
+| Electron app caches | `rm -rf <each cache directory path>/*` (contents only, not the directory). Warn user to close affected apps first. |
+| Stale updater files | `rm -rf <each updater directory path>/*` for directories, `rm -f <path>` for individual .nupkg files. |
+| Playwright browsers | `rm -rf <ms-playwright path>/*` |
 
 **Show progress** as each category is cleaned: what's being deleted and confirmation when done.
 

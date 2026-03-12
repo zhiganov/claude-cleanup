@@ -44,6 +44,9 @@ irm https://raw.githubusercontent.com/zhiganov/claude-cleanup/master/install.ps1
 | Delivery Optimization | Windows | Windows Update distribution cache (up to 20 GB) |
 | Windows Temp files | Windows | `%TEMP%` and `C:\Windows\Temp` |
 | Browser caches | Windows | Chrome, Edge, Firefox, Brave cache and code cache |
+| Electron app caches | Windows | Cache/Code Cache dirs in Slack, Discord, Miro, Claude Desktop, Notion, etc. |
+| Stale updater files | Windows | Applied update packages in Linear, Notion, Signal, Squirrel apps |
+| Playwright browsers | Windows | Downloaded browser binaries in `ms-playwright` |
 
 ## Example Output
 
