@@ -68,13 +68,19 @@ find "/c/Program Files/WizTree" "/c/Program Files (x86)/WizTree" "$LOCALAPPDATA/
 
 Also check: `command -v WizTree64` and `where.exe WizTree64.exe 2>/dev/null`
 
-**If WizTree is found**, run the export:
+**If WizTree is found**, run the export. **CRITICAL:** WizTree is a native Windows app and cannot resolve MSYS2/Git Bash paths. Always convert the export path to a Windows path using `cygpath -w`:
 
 ```bash
-"<path_to_WizTree64.exe>" "C:" /export="/tmp/claude-cleanup/wiztree.csv" /admin=0 /silent
+"<path_to_WizTree64.exe>" "C:" /export="$(cygpath -w /tmp/claude-cleanup/wiztree.csv)" /admin=0 /silent
 ```
 
-Wait for it to complete (typically 5-15 seconds).
+Wait for it to complete (typically 5-15 seconds), then **verify the CSV was created**:
+
+```bash
+sleep 5 && ls -la /tmp/claude-cleanup/wiztree.csv
+```
+
+If the file doesn't exist after 10 seconds, retry once. If still missing, fall back to PowerShell-based scanning.
 
 **If WizTree is NOT found**, check if a recent WizTree CSV already exists in the workspace (the user may have exported one manually):
 
@@ -114,6 +120,19 @@ echo "C:\path\to\directory" | python /tmp/claude-cleanup/wt_lookup.py /tmp/claud
 Output: `sizeMB|path`
 
 You can pipe multiple paths at once (one per line) for batch lookups. This turns a multi-minute scan phase into seconds.
+
+**Piping paths:** Use `printf '%s\n'` to pipe multiple Windows paths to `wt_lookup.py`. Do NOT use heredocs with Windows backslash paths — they cause bash syntax errors:
+
+```bash
+# CORRECT:
+printf '%s\n' \
+'C:\Users\temaz\AppData\Roaming\Slack\Cache' \
+'C:\Users\temaz\AppData\Roaming\Linear\Cache' \
+| python /tmp/claude-cleanup/wt_lookup.py /tmp/claude-cleanup/wiztree.csv
+
+# WRONG — heredocs with backslash paths cause syntax errors:
+# cat << 'EOF' | python ...
+```
 
 **If neither WizTree nor a CSV is available**, fall back to the PowerShell approach described in each category below (marked as "Fallback:").
 
