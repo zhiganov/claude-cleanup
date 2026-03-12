@@ -52,11 +52,76 @@ Determine the workspace root for scanning node_modules and build artifacts:
 - If found, that directory is the workspace root
 - If not found, use the current working directory
 
-Store this path — it is used for categories 2 (node_modules) and 7 (build artifacts).
+Store this path — it is used for node_modules and build artifact categories.
+
+### Step 2.5: WizTree Fast Scan (Windows only)
+
+**Skip if platform is not windows.**
+
+WizTree reads the NTFS Master File Table directly, providing instant directory sizes for the entire drive. When available, it replaces all slow PowerShell `Get-ChildItem` size measurements.
+
+**Check if WizTree is installed:**
+
+```bash
+find "/c/Program Files/WizTree" "/c/Program Files (x86)/WizTree" "$LOCALAPPDATA/Programs/WizTree" -maxdepth 1 -name "WizTree64.exe" 2>/dev/null | head -1
+```
+
+Also check: `command -v WizTree64` and `where.exe WizTree64.exe 2>/dev/null`
+
+**If WizTree is found**, run the export:
+
+```bash
+"<path_to_WizTree64.exe>" "C:" /export="/tmp/claude-cleanup/wiztree.csv" /admin=0 /silent
+```
+
+Wait for it to complete (typically 5-15 seconds).
+
+**If WizTree is NOT found**, check if a recent WizTree CSV already exists in the workspace (the user may have exported one manually):
+
+```bash
+find /c/Users/temaz/claude-project/claude-cleanup -maxdepth 1 -name "WizTree*.csv" -newer /tmp/claude-cleanup 2>/dev/null | head -1
+```
+
+If a CSV is found (either exported or pre-existing), write a Python helper script to `/tmp/claude-cleanup/wt_lookup.py` that provides instant size lookups:
+
+```python
+import csv, sys
+
+sizes = {}
+with open(sys.argv[1], encoding='utf-8-sig') as f:
+    next(f)  # skip comment line
+    reader = csv.reader(f)
+    next(reader)  # skip headers
+    for row in reader:
+        path = row[0].rstrip(chr(92))  # strip trailing backslash
+        sizes[path.lower()] = int(row[1])
+
+# Read requested paths from stdin, one per line
+for line in sys.stdin:
+    qpath = line.strip().lower().rstrip(chr(92))
+    size = sizes.get(qpath, 0)
+    print(f"{size // 1048576}|{line.strip()}")
+```
+
+Test the helper: pipe a known path to verify it works.
+
+**Using WizTree data in categories:** When WizTree data is available, replace all PowerShell `Get-ChildItem -Recurse` size measurements with:
+
+```bash
+echo "C:\path\to\directory" | python /tmp/claude-cleanup/wt_lookup.py /tmp/claude-cleanup/wiztree.csv
+```
+
+Output: `sizeMB|path`
+
+You can pipe multiple paths at once (one per line) for batch lookups. This turns a multi-minute scan phase into seconds.
+
+**If neither WizTree nor a CSV is available**, fall back to the PowerShell approach described in each category below (marked as "Fallback:").
 
 ### Step 3: Scan All Categories
 
 Scan each category below **in parallel where possible**. Show progress as each category completes. Skip categories that don't apply to the current platform or where required tools are missing.
+
+**When WizTree data is available**, batch all size lookups for a category into a single `wt_lookup.py` call instead of running individual PowerShell scripts. This is dramatically faster.
 
 ---
 
@@ -74,23 +139,18 @@ Get-ChildItem "$env:LOCALAPPDATA" -Directory -ErrorAction SilentlyContinue | Whe
     $appDirs = Get-ChildItem $_.FullName -Directory -Filter "app-*" -ErrorAction SilentlyContinue | Sort-Object Name
     if ($appDirs.Count -gt 1) {
         $oldDirs = $appDirs | Select-Object -SkipLast 1
-        $totalSize = 0
-        $oldNames = @()
         foreach ($d in $oldDirs) {
-            $size = (Get-ChildItem $d.FullName -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
-            $totalSize += $size
-            $oldNames += $d.Name
-        }
-        if ($totalSize -gt 5MB) {
-            Write-Output "$([math]::Round($totalSize / 1MB))MB|$($_.Name)|$($oldNames -join ',')|$($oldDirs.FullName -join ',')"
+            Write-Output "$($_.Name)|$($d.Name)|$($d.FullName)"
         }
     }
 }
 ```
 
-Run: `powershell.exe -File "$(cygpath -w /tmp/claude-cleanup/squirrel.ps1)"`
+Run the script to discover old app-* directories. Then measure sizes:
+- **With WizTree:** Pipe all discovered paths to `wt_lookup.py`
+- **Fallback:** Use PowerShell `Get-ChildItem -Recurse -File | Measure-Object -Property Length -Sum` per directory
 
-Parse output. Each line is: `sizeMB|appName|oldVersions|fullPaths`
+Skip entries < 5 MB.
 
 Collect: app names, old version names, sizes, and full paths (needed for deletion).
 
@@ -109,7 +169,8 @@ Find all top-level `node_modules` directories under the workspace root. For each
    - If `git -C <project> log -1 --since="4 weeks ago" --oneline` returns empty → inactive
    - Otherwise → active (skip it)
 3. Measure `node_modules` size:
-   - **Windows:** PowerShell `Get-ChildItem` with `-Recurse -File | Measure-Object -Property Length -Sum`
+   - **With WizTree:** Pipe path to `wt_lookup.py`
+   - **Fallback Windows:** PowerShell `Get-ChildItem` with `-Recurse -File | Measure-Object -Property Length -Sum`
    - **macOS/Linux:** `du -sm <path>/node_modules | cut -f1` (size in MB)
 4. Skip if size < 10 MB
 
@@ -125,21 +186,21 @@ Collect: project name, size, full path.
 
 **npm:**
 - Check: `command -v npm`
-- Measure:
-  - **Windows:** Size of `~/AppData/Local/npm-cache` (via PowerShell)
-  - **macOS/Linux:** Size of `~/.npm/_cacache` (via `du -sm`)
+- Path: **Windows:** `~/AppData/Local/npm-cache`, **macOS/Linux:** `~/.npm/_cacache`
+- **With WizTree:** Pipe path to `wt_lookup.py`
+- **Fallback:** PowerShell or `du -sm`
 - Clean command: `npm cache clean --force`
 
 **pnpm:**
 - Check: `command -v pnpm`
 - Get store path: `pnpm store path`
-- Measure the store directory size
+- Measure the store directory size (WizTree or fallback)
 - Clean command: `pnpm store prune`
 
 **yarn:**
 - Check: `command -v yarn`
 - Detect version: `yarn --version` — if starts with `1.` → Classic, otherwise → Berry
-- Classic (v1): `yarn cache dir` → measure that directory's size. Clean: `yarn cache clean`
+- Classic (v1): `yarn cache dir` → measure. Clean: `yarn cache clean`
 - Berry (v2+): Uses per-project `.yarn/cache`. Clean: `yarn cache clean --all`
 
 Collect: tool name, cache path, size for each installed tool. Sum total.
@@ -166,6 +227,8 @@ Measure sizes of these directories (they are always safe to delete):
 - `~/.claude/file-history/`
 - `~/.claude/telemetry/`
 
+Use WizTree lookup or fallback PowerShell/du for sizes.
+
 Count and measure old session logs:
 - **macOS/Linux:** `find ~/.claude/projects -maxdepth 2 -name "*.jsonl" -mtime +28`
 - **Windows:** PowerShell to find `.jsonl` files under `~/.claude/projects/*/` with LastWriteTime older than 28 days
@@ -181,16 +244,22 @@ Collect: breakdown (debug X MB, file-history Y MB, telemetry Z MB, N old session
 
 ---
 
-#### Category: Crash Dumps
+#### Category: Crash Dumps and Kernel Reports
 
 **Platform-specific paths:**
-- **Windows:** `~/AppData/Local/CrashDumps/`
+- **Windows:** `~/AppData/Local/CrashDumps/` AND `C:\Windows\LiveKernelReports\`
 - **macOS:** `~/Library/Logs/DiagnosticReports/`
 - **Linux:** `/var/crash/` and `~/.local/share/apport/`
 
-Check if the directory exists. If so, measure total size. Skip if directory doesn't exist or is empty.
+Check if each directory exists. Measure total size (WizTree or fallback).
 
-Collect: file count, total size, paths.
+`LiveKernelReports` can contain multi-GB kernel watchdog dumps (e.g., `DripsWatchdog-*.dmp`). These are safe to delete.
+
+Skip if total size < 5 MB.
+
+Clean command: For `CrashDumps`, `rm -rf <path>/*`. For `LiveKernelReports`, requires elevated PowerShell: `Remove-Item "C:\Windows\LiveKernelReports\*" -Recurse -Force`.
+
+Collect: file count, total size, paths, breakdown by location.
 
 ---
 
@@ -207,7 +276,7 @@ In inactive projects, look for these directories:
 - `.vite/`
 - `dist/` — **ONLY if `dist` appears in the project's `.gitignore` file.** Many projects commit `dist/` as published output. Never delete committed `dist/` directories.
 
-Measure each found artifact directory.
+Measure each found artifact directory (WizTree or fallback).
 
 Collect: project name, artifact type, size, full path.
 
@@ -231,20 +300,7 @@ Collect: dangling images size, build cache size, total.
 
 **Skip if platform is not windows.**
 
-Check if `C:\Windows.old` exists. If so, measure its size:
-
-Write a PowerShell temp script to `/tmp/claude-cleanup/windowsold.ps1`:
-```powershell
-$p = "C:\Windows.old"
-if (Test-Path $p) {
-    $s = (Get-ChildItem $p -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
-    Write-Output "$([math]::Round($s / 1MB))"
-} else {
-    Write-Output "0"
-}
-```
-
-Run: `powershell.exe -File "$(cygpath -w /tmp/claude-cleanup/windowsold.ps1)"`
+Check if `C:\Windows.old` exists. Measure size (WizTree or fallback PowerShell).
 
 Skip if size is 0.
 
@@ -258,24 +314,11 @@ Collect: size.
 
 **Skip if platform is not windows.**
 
-Measure the Delivery Optimization cache:
-
-Write a PowerShell temp script to `/tmp/claude-cleanup/delopt.ps1`:
-```powershell
-$p = "$env:SystemDrive\ProgramData\Microsoft\Windows\DeliveryOptimization"
-if (Test-Path $p) {
-    $s = (Get-ChildItem $p -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
-    Write-Output "$([math]::Round($s / 1MB))"
-} else {
-    Write-Output "0"
-}
-```
-
-Run: `powershell.exe -File "$(cygpath -w /tmp/claude-cleanup/delopt.ps1)"`
+Measure: `C:\ProgramData\Microsoft\Windows\DeliveryOptimization` (WizTree or fallback PowerShell).
 
 Skip if size < 50 MB.
 
-Clean command (Step 6): Write a PowerShell script that stops the DoSvc service, deletes cache contents, and restarts the service:
+Clean command (Step 6): Elevated PowerShell:
 ```powershell
 Stop-Service -Name "DoSvc" -Force -ErrorAction SilentlyContinue
 Remove-Item "$env:SystemDrive\ProgramData\Microsoft\Windows\DeliveryOptimization\Cache\*" -Recurse -Force -ErrorAction SilentlyContinue
@@ -292,33 +335,11 @@ Collect: size.
 
 **Skip if platform is not windows.**
 
-Measure temp file directories:
-
-Write a PowerShell temp script to `/tmp/claude-cleanup/tempfiles.ps1`:
-```powershell
-$userTemp = $env:TEMP
-$sysTemp = "$env:SystemRoot\Temp"
-$userSize = 0
-$sysSize = 0
-if (Test-Path $userTemp) {
-    $userSize = (Get-ChildItem $userTemp -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
-}
-if (Test-Path $sysTemp) {
-    $sysSize = (Get-ChildItem $sysTemp -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
-}
-$totalMB = [math]::Round(($userSize + $sysSize) / 1MB)
-$userMB = [math]::Round($userSize / 1MB)
-$sysMB = [math]::Round($sysSize / 1MB)
-Write-Output "$totalMB|$userMB|$sysMB|$userTemp|$sysTemp"
-```
-
-Run: `powershell.exe -File "$(cygpath -w /tmp/claude-cleanup/tempfiles.ps1)"`
-
-Parse output: `totalMB|userTempMB|sysTempMB|userTempPath|sysTempPath`
+Measure `%TEMP%` and `C:\Windows\Temp` (WizTree or fallback PowerShell).
 
 Skip if total < 50 MB.
 
-Clean command (Step 6): Delete contents of both temp directories (not the directories themselves). Exclude the `claude-cleanup` subdirectory used by this script. Files locked by running processes will be skipped automatically by `-ErrorAction SilentlyContinue`:
+Clean command (Step 6): Exclude the `claude-cleanup` subdirectory used by this script. Files locked by running processes will be skipped automatically:
 ```powershell
 Get-ChildItem "$env:TEMP" -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'claude-cleanup' } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item "$env:SystemRoot\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
@@ -332,44 +353,15 @@ Collect: total size, breakdown (user temp X MB, system temp Y MB).
 
 **Skip if platform is not windows.**
 
-Measure browser cache directories for installed browsers:
+Measure browser cache directories for installed browsers. Check these paths:
 
-Write a PowerShell temp script to `/tmp/claude-cleanup/browsercache.ps1`:
-```powershell
-$browsers = @(
-    @{ Name = "Chrome"; Path = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Cache" },
-    @{ Name = "Chrome"; Path = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Code Cache" },
-    @{ Name = "Edge"; Path = "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Cache" },
-    @{ Name = "Edge"; Path = "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Code Cache" },
-    @{ Name = "Firefox"; Path = "" },
-    @{ Name = "Brave"; Path = "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data\Default\Cache" }
-)
-# Firefox uses a profile-based path
-$ffProfiles = "$env:LOCALAPPDATA\Mozilla\Firefox\Profiles"
-if (Test-Path $ffProfiles) {
-    Get-ChildItem $ffProfiles -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-        $cachePath = Join-Path $_.FullName "cache2"
-        if (Test-Path $cachePath) {
-            $s = (Get-ChildItem $cachePath -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
-            if ($s -gt 0) {
-                Write-Output "Firefox|$([math]::Round($s / 1MB))|$cachePath"
-            }
-        }
-    }
-}
-foreach ($b in $browsers) {
-    if ($b.Path -ne "" -and (Test-Path $b.Path)) {
-        $s = (Get-ChildItem $b.Path -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
-        if ($s -gt 10MB) {
-            Write-Output "$($b.Name)|$([math]::Round($s / 1MB))|$($b.Path)"
-        }
-    }
-}
-```
+- Chrome: `%LOCALAPPDATA%\Google\Chrome\User Data\Default\Cache`, `...\Code Cache`
+- Edge: `%LOCALAPPDATA%\Microsoft\Edge\User Data\Default\Cache`, `...\Code Cache`
+- Brave: `%LOCALAPPDATA%\BraveSoftware\Brave-Browser\User Data\Default\Cache`
+- Firefox: `%LOCALAPPDATA%\Mozilla\Firefox\Profiles\*\cache2`
 
-Run: `powershell.exe -File "$(cygpath -w /tmp/claude-cleanup/browsercache.ps1)"`
-
-Parse output. Each line is: `browserName|sizeMB|fullPath`
+**With WizTree:** Pipe all paths to `wt_lookup.py` in one batch call.
+**Fallback:** Use PowerShell `Get-ChildItem -Recurse` per path.
 
 Group by browser name (sum sizes if multiple paths per browser). Skip if total across all browsers < 50 MB.
 
@@ -385,67 +377,33 @@ Collect: browser names, sizes, paths.
 
 **Skip if platform is not windows.**
 
-Electron apps store caches in `%APPDATA%/<AppName>/` and `%LOCALAPPDATA%/<AppName>/`. Scan for `Cache/`, `Code Cache/`, `GPUCache/`, and `Service Worker/CacheStorage/` subdirectories inside known Electron app directories.
+Electron apps store caches in `%APPDATA%/<AppName>/` and `%LOCALAPPDATA%/<AppName>/`. Scan for `Cache/`, `Code Cache/`, `GPUCache/`, and `Service Worker/CacheStorage/` subdirectories inside these app directories:
 
-Write a PowerShell temp script to `/tmp/claude-cleanup/electroncache.ps1`:
-```powershell
-$apps = @(
-    @{ Name = "Claude Desktop"; Path = "$env:APPDATA\Claude" },
-    @{ Name = "Miro"; Path = "$env:APPDATA\RealtimeBoard" },
-    @{ Name = "Slack"; Path = "$env:APPDATA\Slack" },
-    @{ Name = "Discord"; Path = "$env:APPDATA\discord" },
-    @{ Name = "Linear"; Path = "$env:APPDATA\Linear" },
-    @{ Name = "Notion"; Path = "$env:APPDATA\Notion" },
-    @{ Name = "Notion Calendar"; Path = "$env:APPDATA\Notion Calendar" },
-    @{ Name = "Signal"; Path = "$env:APPDATA\Signal" },
-    @{ Name = "Element"; Path = "$env:APPDATA\Element" },
-    @{ Name = "Figma"; Path = "$env:APPDATA\Figma" },
-    @{ Name = "Zoom"; Path = "$env:APPDATA\Zoom" },
-    @{ Name = "Telegram"; Path = "$env:APPDATA\Telegram Desktop" },
-    @{ Name = "Tana"; Path = "$env:LOCALAPPDATA\tana" },
-    @{ Name = "TogglTrack"; Path = "$env:LOCALAPPDATA\TogglTrack" }
-)
-$cacheDirNames = @("Cache", "Code Cache", "GPUCache", "cache", "blob_storage")
+- Claude Desktop (`%APPDATA%\Claude`)
+- Miro (`%APPDATA%\RealtimeBoard`)
+- Slack (`%APPDATA%\Slack`)
+- Discord (`%APPDATA%\discord`)
+- Linear (`%APPDATA%\Linear`)
+- Notion (`%APPDATA%\Notion`)
+- Notion Calendar (`%APPDATA%\Notion Calendar`)
+- Signal (`%APPDATA%\Signal`)
+- Element (`%APPDATA%\Element`)
+- Figma (`%APPDATA%\Figma`)
+- Zoom (`%APPDATA%\Zoom`)
+- Telegram (`%APPDATA%\Telegram Desktop`)
+- Tana (`%LOCALAPPDATA%\tana`)
+- TogglTrack (`%LOCALAPPDATA%\TogglTrack`)
 
-foreach ($app in $apps) {
-    if (-not (Test-Path $app.Path)) { continue }
-    $totalSize = 0
-    $paths = @()
-    foreach ($cacheName in $cacheDirNames) {
-        # Search recursively but only 2 levels deep
-        Get-ChildItem $app.Path -Directory -Filter $cacheName -Recurse -Depth 2 -ErrorAction SilentlyContinue | ForEach-Object {
-            $s = (Get-ChildItem $_.FullName -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
-            if ($s -gt 1MB) {
-                $totalSize += $s
-                $paths += $_.FullName
-            }
-        }
-    }
-    # Also check for Service Worker/CacheStorage
-    $swPath = Join-Path $app.Path "Service Worker\CacheStorage"
-    if (Test-Path $swPath) {
-        $s = (Get-ChildItem $swPath -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
-        if ($s -gt 1MB) {
-            $totalSize += $s
-            $paths += $swPath
-        }
-    }
-    if ($totalSize -gt 10MB) {
-        $mb = [math]::Round($totalSize / 1MB)
-        Write-Output "$($app.Name)|$mb|$($paths -join ';')"
-    }
-}
-```
+For each installed app, discover cache subdirectories (PowerShell `Get-ChildItem -Directory -Filter <cacheName> -Recurse -Depth 2`), then measure sizes:
 
-Run: `powershell.exe -File "$(cygpath -w /tmp/claude-cleanup/electroncache.ps1)"`
+- **With WizTree:** Pipe all discovered cache paths to `wt_lookup.py`
+- **Fallback:** PowerShell `Get-ChildItem -Recurse`
 
-Parse output. Each line is: `appName|sizeMB|semicolonSeparatedPaths`
+Skip apps with < 10 MB of caches. Skip category if total < 50 MB.
 
-Skip if total across all apps < 50 MB.
+**IMPORTANT:** Warn the user to close the affected apps before cleaning for best results.
 
-**IMPORTANT:** Warn the user to close the affected apps before cleaning for best results. Files locked by running apps will be skipped automatically.
-
-Clean command (Step 6): `rm -rf <each cache directory path>/*` (delete contents, not the directory itself — apps recreate cache dirs on next launch).
+Clean command (Step 6): `rm -rf <each cache directory path>/*` (contents only).
 
 Collect: app names, sizes, paths.
 
@@ -455,53 +413,21 @@ Collect: app names, sizes, paths.
 
 **Skip if platform is not windows.**
 
-Electron apps using Squirrel or similar updaters keep downloaded update packages in `pending/` and `updates/` directories after they've been applied.
+Electron apps using Squirrel or similar updaters keep downloaded update packages after they've been applied.
 
-Write a PowerShell temp script to `/tmp/claude-cleanup/staleupdaters.ps1`:
-```powershell
-$updaterPaths = @(
-    @{ Name = "Linear"; Path = "$env:LOCALAPPDATA\@lineardesktop-updater\pending" },
-    @{ Name = "Notion"; Path = "$env:LOCALAPPDATA\notion-updater\pending" },
-    @{ Name = "uTorrent"; Path = "$env:APPDATA\uTorrent\updates" },
-    @{ Name = "Signal"; Path = "$env:APPDATA\Signal\update-cache" }
-)
+Check these paths:
+- `%LOCALAPPDATA%\@lineardesktop-updater\pending`
+- `%LOCALAPPDATA%\notion-updater\pending`
+- `%APPDATA%\uTorrent\updates`
+- `%APPDATA%\Signal\update-cache`
 
-foreach ($u in $updaterPaths) {
-    if (Test-Path $u.Path) {
-        $s = (Get-ChildItem $u.Path -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
-        if ($s -gt 5MB) {
-            Write-Output "$($u.Name)|$([math]::Round($s / 1MB))|$($u.Path)"
-        }
-    }
-}
+Also scan Squirrel apps (`%LOCALAPPDATA%\<app>\packages\`) for old `.nupkg` files — keep only the newest, measure the rest.
 
-# Also scan for any Squirrel app packages/ directories with old .nupkg files
-Get-ChildItem "$env:LOCALAPPDATA" -Directory -ErrorAction SilentlyContinue | Where-Object {
-    Test-Path (Join-Path $_.FullName "Update.exe")
-} | ForEach-Object {
-    $pkgDir = Join-Path $_.FullName "packages"
-    if (Test-Path $pkgDir) {
-        # Keep only the newest .nupkg, measure the rest
-        $nupkgs = Get-ChildItem $pkgDir -Filter "*.nupkg" -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime
-        if ($nupkgs.Count -gt 1) {
-            $old = $nupkgs | Select-Object -SkipLast 1
-            $s = ($old | Measure-Object -Property Length -Sum).Sum
-            if ($s -gt 5MB) {
-                $paths = ($old | ForEach-Object { $_.FullName }) -join ';'
-                Write-Output "$($_.Name) (old packages)|$([math]::Round($s / 1MB))|$paths"
-            }
-        }
-    }
-}
-```
-
-Run: `powershell.exe -File "$(cygpath -w /tmp/claude-cleanup/staleupdaters.ps1)"`
-
-Parse output. Each line is: `appName|sizeMB|pathOrPaths`
+Measure sizes (WizTree or fallback PowerShell).
 
 Skip if total < 20 MB.
 
-Clean command (Step 6): `rm -rf <each path>/*` for directories, or `rm -f <each file path>` for individual .nupkg files.
+Clean command (Step 6): `rm -rf <each path>/*` for directories, or `rm -f <path>` for individual .nupkg files.
 
 Collect: app names, sizes, paths.
 
@@ -513,27 +439,7 @@ Collect: app names, sizes, paths.
 
 Playwright downloads full browser binaries to `%LOCALAPPDATA%\ms-playwright\`. These can be large (200-400 MB each) and accumulate when Playwright updates.
 
-Write a PowerShell temp script to `/tmp/claude-cleanup/playwright.ps1`:
-```powershell
-$p = "$env:LOCALAPPDATA\ms-playwright"
-if (Test-Path $p) {
-    $dirs = Get-ChildItem $p -Directory -ErrorAction SilentlyContinue
-    $totalSize = 0
-    $names = @()
-    foreach ($d in $dirs) {
-        $s = (Get-ChildItem $d.FullName -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
-        $totalSize += $s
-        $names += "$($d.Name) ($([math]::Round($s / 1MB))MB)"
-    }
-    Write-Output "$([math]::Round($totalSize / 1MB))|$($names -join ',')|$p"
-} else {
-    Write-Output "0||"
-}
-```
-
-Run: `powershell.exe -File "$(cygpath -w /tmp/claude-cleanup/playwright.ps1)"`
-
-Parse output: `totalMB|browserList|path`
+Measure size (WizTree or fallback PowerShell). List subdirectories (browser versions).
 
 Skip if total < 50 MB.
 
@@ -542,6 +448,48 @@ Skip if total < 50 MB.
 Clean command (Step 6): `rm -rf <ms-playwright path>/*`
 
 Collect: total size, browser list, path.
+
+---
+
+#### Category: Windows System Logs (Windows only)
+
+**Skip if platform is not windows.**
+
+Windows accumulates large log files that are safe to clean periodically:
+
+- `C:\Windows\Logs\CBS\` — Component-Based Servicing logs (can grow to 500+ MB)
+- `C:\ProgramData\Comms\PCManager\log\` — OEM PC Manager logs (Huawei, Lenovo, etc.)
+
+Measure sizes (WizTree or fallback PowerShell). Skip paths that don't exist.
+
+Skip if total < 50 MB.
+
+Clean command (Step 6): Requires elevated PowerShell:
+```powershell
+Remove-Item "$env:SystemRoot\Logs\CBS\*" -Force -ErrorAction SilentlyContinue
+Remove-Item "$env:ProgramData\Comms\PCManager\log\*" -Recurse -Force -ErrorAction SilentlyContinue
+```
+
+Collect: breakdown by path, total size.
+
+---
+
+#### Category: VS Package Cache (Windows only)
+
+**Skip if platform is not windows.**
+
+Visual Studio stores downloaded installer packages in `C:\ProgramData\Microsoft\VisualStudio\Packages\`. This cache can grow to several GB and is safe to clean — VS will re-download packages if needed for modifications or repairs.
+
+Measure size (WizTree or fallback PowerShell). Skip if path doesn't exist or size < 100 MB.
+
+Clean command (Step 6): Requires elevated PowerShell:
+```powershell
+Remove-Item "$env:ProgramData\Microsoft\VisualStudio\Packages\*" -Recurse -Force -ErrorAction SilentlyContinue
+```
+
+**Note:** After cleaning, VS component modifications/repairs will need to re-download packages. This is fine for normal use.
+
+Collect: size.
 
 ---
 
@@ -596,7 +544,20 @@ Wait for user response. Parse their selection:
 
 ### Step 6: Execute Cleanup
 
-For each selected category, execute the appropriate cleanup:
+For each selected category, execute the appropriate cleanup.
+
+**Elevated cleanup (Windows):** Several categories require admin privileges. When the user selects any elevated category, batch all elevated operations into a single PowerShell script and run it with `Start-Process -Verb RunAs` (triggers one UAC prompt instead of many):
+
+```bash
+cat > /tmp/claude-cleanup/admin_cleanup.ps1 << 'PS1'
+# ... all elevated Remove-Item commands ...
+PS1
+powershell.exe -Command "Start-Process powershell.exe -ArgumentList '-File','<windows_path_to_script>' -Verb RunAs -Wait"
+```
+
+**Categories requiring elevation:** LiveKernelReports, CBS logs, OEM logs, VS Package Cache, Delivery Optimization, Windows.old (manual only).
+
+**Full cleanup command reference:**
 
 | Category | Clean Command |
 |----------|--------------|
@@ -608,18 +569,20 @@ For each selected category, execute the appropriate cleanup:
 | yarn v2+ cache | `yarn cache clean --all` |
 | pip cache | `pip cache purge` (or `pip3 cache purge`) |
 | Claude Code debris | `rm -rf ~/.claude/debug/* ~/.claude/file-history/* ~/.claude/telemetry/*` and delete old `.jsonl` files: macOS/Linux `find ~/.claude/projects -maxdepth 2 -name "*.jsonl" -mtime +28 -delete`, Windows use PowerShell equivalent |
-| Crash dumps | `rm -rf <contents of platform-specific crash dump paths>` |
+| Crash dumps | `rm -rf <CrashDumps path>/*`. LiveKernelReports: **elevated** `Remove-Item "C:\Windows\LiveKernelReports\*" -Recurse -Force` |
 | Build artifacts | `rm -rf <each artifact directory path>` |
 | Docker (images) | `docker image prune -f` |
 | Docker (build cache) | `docker builder prune -f` |
 | App caches | `rm -rf <each large cache directory path>` |
 | Windows.old | **Cannot be deleted via CLI.** Instruct the user to use Settings > System > Storage > Temporary files > Previous Windows installation(s), or Disk Cleanup as Administrator. |
-| Delivery Optimization | PowerShell: `Stop-Service DoSvc -Force; Remove-Item "$env:SystemDrive\ProgramData\Microsoft\Windows\DeliveryOptimization\Cache\*" -Recurse -Force; Start-Service DoSvc`. If access denied, instruct user to use Settings > Storage > Temporary files. |
-| Windows Temp files | PowerShell: `Remove-Item "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item "$env:SystemRoot\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue` |
-| Browser caches | `rm -rf <each cache directory path>/*` (contents only, not the directory). Warn user to close browsers first. |
-| Electron app caches | `rm -rf <each cache directory path>/*` (contents only, not the directory). Warn user to close affected apps first. |
+| Delivery Optimization | **Elevated:** `Stop-Service DoSvc -Force; Remove-Item ...\Cache\* -Recurse -Force; Start-Service DoSvc`. If access denied, instruct user to use Settings > Storage > Temporary files. |
+| Windows Temp files | **Elevated for system temp.** User temp: PowerShell `Get-ChildItem "$env:TEMP" | Where-Object { $_.Name -ne 'claude-cleanup' } | Remove-Item -Recurse -Force`. System temp: **elevated** `Remove-Item "$env:SystemRoot\Temp\*" -Recurse -Force` |
+| Browser caches | `rm -rf <each cache directory path>/*` (contents only). Warn user to close browsers first. |
+| Electron app caches | `rm -rf <each cache directory path>/*` (contents only). Warn user to close affected apps first. |
 | Stale updater files | `rm -rf <each updater directory path>/*` for directories, `rm -f <path>` for individual .nupkg files. |
 | Playwright browsers | `rm -rf <ms-playwright path>/*` |
+| Windows System Logs | **Elevated:** `Remove-Item "$env:SystemRoot\Logs\CBS\*" -Force; Remove-Item "$env:ProgramData\Comms\PCManager\log\*" -Recurse -Force` |
+| VS Package Cache | **Elevated:** `Remove-Item "$env:ProgramData\Microsoft\VisualStudio\Packages\*" -Recurse -Force` |
 
 **Show progress** as each category is cleaned: what's being deleted and confirmation when done.
 
