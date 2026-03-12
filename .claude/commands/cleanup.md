@@ -12,6 +12,11 @@ Parse `$ARGUMENTS`: if it contains `--dry-run`, operate in report-only mode (ski
 
 ### Step 1: Detect Platform and Measure Disk Space
 
+Create a temp directory for cleanup scripts (on Windows, `/tmp/` maps to `%TEMP%` which gets cleaned by the temp files category — using a subdirectory lets us exclude it):
+```bash
+mkdir -p /tmp/claude-cleanup
+```
+
 Run:
 ```bash
 uname -s
@@ -24,7 +29,7 @@ Determine platform:
 
 Measure current disk space ("before" snapshot for the final summary):
 
-- **Windows:** Write a PowerShell temp script to `/tmp/diskspace.ps1`:
+- **Windows:** Write a PowerShell temp script to `/tmp/claude-cleanup/diskspace.ps1`:
   ```powershell
   $drive = (Get-Location).Drive.Name
   $d = Get-PSDrive $drive
@@ -33,7 +38,7 @@ Measure current disk space ("before" snapshot for the final summary):
   $pct = [math]::Round($d.Used / ($d.Used + $d.Free) * 100)
   Write-Output "$free $total $pct"
   ```
-  Run: `powershell.exe -File "$(cygpath -w /tmp/diskspace.ps1)"`
+  Run: `powershell.exe -File "$(cygpath -w /tmp/claude-cleanup/diskspace.ps1)"`
   Parse output: free_gb total_gb used_pct
 
 - **macOS/Linux:** Run `df -h /` and parse the output for free space, total size, and usage percentage.
@@ -61,7 +66,7 @@ Scan each category below **in parallel where possible**. Show progress as each c
 
 Electron apps on Windows use the Squirrel updater, which keeps old versions in `~/AppData/Local/<app>/app-*` directories.
 
-Write a PowerShell temp script to `/tmp/squirrel.ps1`:
+Write a PowerShell temp script to `/tmp/claude-cleanup/squirrel.ps1`:
 ```powershell
 Get-ChildItem "$env:LOCALAPPDATA" -Directory -ErrorAction SilentlyContinue | Where-Object {
     Test-Path (Join-Path $_.FullName "Update.exe")
@@ -83,7 +88,7 @@ Get-ChildItem "$env:LOCALAPPDATA" -Directory -ErrorAction SilentlyContinue | Whe
 }
 ```
 
-Run: `powershell.exe -File "$(cygpath -w /tmp/squirrel.ps1)"`
+Run: `powershell.exe -File "$(cygpath -w /tmp/claude-cleanup/squirrel.ps1)"`
 
 Parse output. Each line is: `sizeMB|appName|oldVersions|fullPaths`
 
@@ -228,7 +233,7 @@ Collect: dangling images size, build cache size, total.
 
 Check if `C:\Windows.old` exists. If so, measure its size:
 
-Write a PowerShell temp script to `/tmp/windowsold.ps1`:
+Write a PowerShell temp script to `/tmp/claude-cleanup/windowsold.ps1`:
 ```powershell
 $p = "C:\Windows.old"
 if (Test-Path $p) {
@@ -239,7 +244,7 @@ if (Test-Path $p) {
 }
 ```
 
-Run: `powershell.exe -File "$(cygpath -w /tmp/windowsold.ps1)"`
+Run: `powershell.exe -File "$(cygpath -w /tmp/claude-cleanup/windowsold.ps1)"`
 
 Skip if size is 0.
 
@@ -255,7 +260,7 @@ Collect: size.
 
 Measure the Delivery Optimization cache:
 
-Write a PowerShell temp script to `/tmp/delopt.ps1`:
+Write a PowerShell temp script to `/tmp/claude-cleanup/delopt.ps1`:
 ```powershell
 $p = "$env:SystemDrive\ProgramData\Microsoft\Windows\DeliveryOptimization"
 if (Test-Path $p) {
@@ -266,7 +271,7 @@ if (Test-Path $p) {
 }
 ```
 
-Run: `powershell.exe -File "$(cygpath -w /tmp/delopt.ps1)"`
+Run: `powershell.exe -File "$(cygpath -w /tmp/claude-cleanup/delopt.ps1)"`
 
 Skip if size < 50 MB.
 
@@ -289,7 +294,7 @@ Collect: size.
 
 Measure temp file directories:
 
-Write a PowerShell temp script to `/tmp/tempfiles.ps1`:
+Write a PowerShell temp script to `/tmp/claude-cleanup/tempfiles.ps1`:
 ```powershell
 $userTemp = $env:TEMP
 $sysTemp = "$env:SystemRoot\Temp"
@@ -307,15 +312,15 @@ $sysMB = [math]::Round($sysSize / 1MB)
 Write-Output "$totalMB|$userMB|$sysMB|$userTemp|$sysTemp"
 ```
 
-Run: `powershell.exe -File "$(cygpath -w /tmp/tempfiles.ps1)"`
+Run: `powershell.exe -File "$(cygpath -w /tmp/claude-cleanup/tempfiles.ps1)"`
 
 Parse output: `totalMB|userTempMB|sysTempMB|userTempPath|sysTempPath`
 
 Skip if total < 50 MB.
 
-Clean command (Step 6): Delete contents of both temp directories (not the directories themselves). Files locked by running processes will be skipped automatically by `-ErrorAction SilentlyContinue`:
+Clean command (Step 6): Delete contents of both temp directories (not the directories themselves). Exclude the `claude-cleanup` subdirectory used by this script. Files locked by running processes will be skipped automatically by `-ErrorAction SilentlyContinue`:
 ```powershell
-Remove-Item "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
+Get-ChildItem "$env:TEMP" -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'claude-cleanup' } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item "$env:SystemRoot\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
 ```
 
@@ -329,7 +334,7 @@ Collect: total size, breakdown (user temp X MB, system temp Y MB).
 
 Measure browser cache directories for installed browsers:
 
-Write a PowerShell temp script to `/tmp/browsercache.ps1`:
+Write a PowerShell temp script to `/tmp/claude-cleanup/browsercache.ps1`:
 ```powershell
 $browsers = @(
     @{ Name = "Chrome"; Path = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Cache" },
@@ -362,7 +367,7 @@ foreach ($b in $browsers) {
 }
 ```
 
-Run: `powershell.exe -File "$(cygpath -w /tmp/browsercache.ps1)"`
+Run: `powershell.exe -File "$(cygpath -w /tmp/claude-cleanup/browsercache.ps1)"`
 
 Parse output. Each line is: `browserName|sizeMB|fullPath`
 
