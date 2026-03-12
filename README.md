@@ -40,6 +40,10 @@ irm https://raw.githubusercontent.com/zhiganov/claude-cleanup/master/install.ps1
 | Build artifacts | All | `.next/`, `.turbo/`, `.parcel-cache/`, `.vite/` in inactive projects |
 | Docker | All | Dangling images, build cache |
 | App caches | macOS, Linux | Large app cache directories (>50 MB) |
+| Windows.old | Windows | Previous Windows installation (10-30 GB after upgrades) |
+| Delivery Optimization | Windows | Windows Update distribution cache (up to 20 GB) |
+| Windows Temp files | Windows | `%TEMP%` and `C:\Windows\Temp` |
+| Browser caches | Windows | Chrome, Edge, Firefox, Brave cache and code cache |
 
 ## Example Output
 
@@ -64,6 +68,8 @@ Which categories to clean? Enter numbers (e.g., 1,2,3), all, or none to cancel.
 - **Respects active projects.** Only cleans node_modules and build artifacts in projects with no git activity in 4+ weeks.
 - **Protects Claude Code data.** Never touches memories, commands, skills, settings, or history.
 - **Safe Docker cleanup.** Only prunes dangling images and build cache — never removes stopped containers or volumes.
+- **Handles elevated categories.** Windows.old and Delivery Optimization require admin access — provides clear instructions if CLI cleanup fails.
+- **Browser-safe.** Warns to close browsers before cleaning caches; locked files are skipped automatically.
 - **Skips missing tools.** If Docker, pip, pnpm, or yarn isn't installed, that category is silently skipped.
 - **Handles failures gracefully.** If one category fails, continues with the rest and reports what failed.
 

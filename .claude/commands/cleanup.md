@@ -222,9 +222,163 @@ Collect: dangling images size, build cache size, total.
 
 ---
 
+#### Category: Windows.old (Windows only)
+
+**Skip if platform is not windows.**
+
+Check if `C:\Windows.old` exists. If so, measure its size:
+
+Write a PowerShell temp script to `/tmp/windowsold.ps1`:
+```powershell
+$p = "C:\Windows.old"
+if (Test-Path $p) {
+    $s = (Get-ChildItem $p -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+    Write-Output "$([math]::Round($s / 1MB))"
+} else {
+    Write-Output "0"
+}
+```
+
+Run: `powershell.exe -File "$(cygpath -w /tmp/windowsold.ps1)"`
+
+Skip if size is 0.
+
+**IMPORTANT:** This category requires elevated privileges to delete. During cleanup (Step 6), warn the user that Windows.old must be removed via Settings > System > Storage > Temporary files > Previous Windows installation(s), or via Disk Cleanup run as Administrator. Do NOT attempt `rm -rf` — it will fail with permission errors.
+
+Collect: size.
+
+---
+
+#### Category: Delivery Optimization Cache (Windows only)
+
+**Skip if platform is not windows.**
+
+Measure the Delivery Optimization cache:
+
+Write a PowerShell temp script to `/tmp/delopt.ps1`:
+```powershell
+$p = "$env:SystemDrive\ProgramData\Microsoft\Windows\DeliveryOptimization"
+if (Test-Path $p) {
+    $s = (Get-ChildItem $p -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+    Write-Output "$([math]::Round($s / 1MB))"
+} else {
+    Write-Output "0"
+}
+```
+
+Run: `powershell.exe -File "$(cygpath -w /tmp/delopt.ps1)"`
+
+Skip if size < 50 MB.
+
+Clean command (Step 6): Write a PowerShell script that stops the DoSvc service, deletes cache contents, and restarts the service:
+```powershell
+Stop-Service -Name "DoSvc" -Force -ErrorAction SilentlyContinue
+Remove-Item "$env:SystemDrive\ProgramData\Microsoft\Windows\DeliveryOptimization\Cache\*" -Recurse -Force -ErrorAction SilentlyContinue
+Start-Service -Name "DoSvc" -ErrorAction SilentlyContinue
+```
+
+**Note:** Requires elevated privileges. If cleanup fails with access denied, inform the user to run via Settings > System > Storage > Temporary files > Delivery Optimization Files.
+
+Collect: size.
+
+---
+
+#### Category: Windows Temp Files (Windows only)
+
+**Skip if platform is not windows.**
+
+Measure temp file directories:
+
+Write a PowerShell temp script to `/tmp/tempfiles.ps1`:
+```powershell
+$userTemp = $env:TEMP
+$sysTemp = "$env:SystemRoot\Temp"
+$userSize = 0
+$sysSize = 0
+if (Test-Path $userTemp) {
+    $userSize = (Get-ChildItem $userTemp -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+}
+if (Test-Path $sysTemp) {
+    $sysSize = (Get-ChildItem $sysTemp -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+}
+$totalMB = [math]::Round(($userSize + $sysSize) / 1MB)
+$userMB = [math]::Round($userSize / 1MB)
+$sysMB = [math]::Round($sysSize / 1MB)
+Write-Output "$totalMB|$userMB|$sysMB|$userTemp|$sysTemp"
+```
+
+Run: `powershell.exe -File "$(cygpath -w /tmp/tempfiles.ps1)"`
+
+Parse output: `totalMB|userTempMB|sysTempMB|userTempPath|sysTempPath`
+
+Skip if total < 50 MB.
+
+Clean command (Step 6): Delete contents of both temp directories (not the directories themselves). Files locked by running processes will be skipped automatically by `-ErrorAction SilentlyContinue`:
+```powershell
+Remove-Item "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item "$env:SystemRoot\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
+```
+
+Collect: total size, breakdown (user temp X MB, system temp Y MB).
+
+---
+
+#### Category: Browser Caches (Windows only)
+
+**Skip if platform is not windows.**
+
+Measure browser cache directories for installed browsers:
+
+Write a PowerShell temp script to `/tmp/browsercache.ps1`:
+```powershell
+$browsers = @(
+    @{ Name = "Chrome"; Path = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Cache" },
+    @{ Name = "Chrome"; Path = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Code Cache" },
+    @{ Name = "Edge"; Path = "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Cache" },
+    @{ Name = "Edge"; Path = "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Code Cache" },
+    @{ Name = "Firefox"; Path = "" },
+    @{ Name = "Brave"; Path = "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data\Default\Cache" }
+)
+# Firefox uses a profile-based path
+$ffProfiles = "$env:LOCALAPPDATA\Mozilla\Firefox\Profiles"
+if (Test-Path $ffProfiles) {
+    Get-ChildItem $ffProfiles -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+        $cachePath = Join-Path $_.FullName "cache2"
+        if (Test-Path $cachePath) {
+            $s = (Get-ChildItem $cachePath -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+            if ($s -gt 0) {
+                Write-Output "Firefox|$([math]::Round($s / 1MB))|$cachePath"
+            }
+        }
+    }
+}
+foreach ($b in $browsers) {
+    if ($b.Path -ne "" -and (Test-Path $b.Path)) {
+        $s = (Get-ChildItem $b.Path -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+        if ($s -gt 10MB) {
+            Write-Output "$($b.Name)|$([math]::Round($s / 1MB))|$($b.Path)"
+        }
+    }
+}
+```
+
+Run: `powershell.exe -File "$(cygpath -w /tmp/browsercache.ps1)"`
+
+Parse output. Each line is: `browserName|sizeMB|fullPath`
+
+Group by browser name (sum sizes if multiple paths per browser). Skip if total across all browsers < 50 MB.
+
+**IMPORTANT:** Warn the user to close browsers before cleaning for best results. Files locked by running browsers will be skipped automatically.
+
+Clean command (Step 6): `rm -rf <each cache directory path>/*` (delete contents, not the directory itself — browsers recreate it).
+
+Collect: browser names, sizes, paths.
+
+---
+
 #### Category: App Caches (macOS + Linux only)
 
-**Skip on Windows** (Squirrel category covers Windows app bloat).
+**Skip on Windows** (other Windows-specific categories cover app bloat).
 
 - **macOS:** Scan `~/Library/Caches/` for subdirectories larger than 50 MB
 - **Linux:** Scan `~/.cache/` for subdirectories larger than 50 MB
@@ -290,6 +444,10 @@ For each selected category, execute the appropriate cleanup:
 | Docker (images) | `docker image prune -f` |
 | Docker (build cache) | `docker builder prune -f` |
 | App caches | `rm -rf <each large cache directory path>` |
+| Windows.old | **Cannot be deleted via CLI.** Instruct the user to use Settings > System > Storage > Temporary files > Previous Windows installation(s), or Disk Cleanup as Administrator. |
+| Delivery Optimization | PowerShell: `Stop-Service DoSvc -Force; Remove-Item "$env:SystemDrive\ProgramData\Microsoft\Windows\DeliveryOptimization\Cache\*" -Recurse -Force; Start-Service DoSvc`. If access denied, instruct user to use Settings > Storage > Temporary files. |
+| Windows Temp files | PowerShell: `Remove-Item "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item "$env:SystemRoot\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue` |
+| Browser caches | `rm -rf <each cache directory path>/*` (contents only, not the directory). Warn user to close browsers first. |
 
 **Show progress** as each category is cleaned: what's being deleted and confirmation when done.
 
