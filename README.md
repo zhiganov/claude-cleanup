@@ -35,7 +35,7 @@ If [WizTree](https://www.diskanalyzer.com/) is installed, the scan phase complet
 - Falls back to PowerShell scanning if not installed
 - Also accepts a manually-exported WizTree CSV
 
-## What It Scans (19 categories)
+## What It Scans (22 categories)
 
 Cross-platform:
 
@@ -63,6 +63,9 @@ Windows-specific:
 | Crash dumps & kernel reports | CrashDumps + LiveKernelReports (multi-GB watchdog dumps) |
 | Windows System Logs | CBS logs, OEM PC Manager logs |
 | VS Package Cache | Visual Studio installer package cache |
+| AppData remnants | Orphaned app data dirs for uninstalled programs (>50 MB, user-confirmed) |
+| Windows SDK old versions | Old SDK versions in `Windows Kits\10\` (keeps newest) |
+| Orphaned VS installations | VS directories the installer no longer tracks |
 
 macOS/Linux:
 

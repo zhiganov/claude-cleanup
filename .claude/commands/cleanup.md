@@ -493,6 +493,196 @@ Collect: size.
 
 ---
 
+#### Category: AppData Remnants (Windows only)
+
+**Skip if platform is not windows.**
+
+When apps are uninstalled, their data directories in `%APPDATA%` and `%LOCALAPPDATA%` often remain. Detect orphaned directories by cross-referencing against installed programs.
+
+Write a PowerShell temp script to `/tmp/claude-cleanup/appdata_orphans.ps1`:
+```powershell
+# Get list of installed programs from registry (both 64-bit and 32-bit)
+$installed = @()
+$regPaths = @(
+    "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+    "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*",
+    "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*"
+)
+foreach ($rp in $regPaths) {
+    Get-ItemProperty $rp -ErrorAction SilentlyContinue | ForEach-Object {
+        if ($_.DisplayName) { $installed += $_.DisplayName.ToLower() }
+        if ($_.InstallLocation) { $installed += (Split-Path $_.InstallLocation -Leaf).ToLower() }
+    }
+}
+
+# Known system/safe directories to skip (never flag as orphaned)
+$skipDirs = @(
+    'microsoft', 'windows', '.net', 'identities', 'adobe', 'intel', 'nvidia',
+    'apple', 'sun', 'java', 'oracle', 'nuget', 'python', 'pip', 'npm',
+    'node.js', 'git', 'ssh', 'gnupg', 'local', 'locallow', 'roaming',
+    'temp', 'temporary internet files', 'packages', 'connecteddevicesplatform',
+    'publishers', 'comms', 'windowsapps', 'programs', 'microsoft\windows',
+    'claude-cleanup'
+)
+
+function Test-Orphaned($dirName) {
+    $lower = $dirName.ToLower()
+    # Skip system/known directories
+    foreach ($s in $skipDirs) { if ($lower -eq $s -or $lower.StartsWith('.')) { return $false } }
+    # Check if any installed program matches this directory name
+    foreach ($prog in $installed) {
+        if ($prog.Contains($lower) -or $lower.Contains($prog.Split(' ')[0])) { return $false }
+    }
+    return $true
+}
+
+# Scan both AppData locations
+$locations = @($env:APPDATA, $env:LOCALAPPDATA)
+foreach ($loc in $locations) {
+    Get-ChildItem $loc -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+        if (Test-Orphaned $_.Name) {
+            $s = (Get-ChildItem $_.FullName -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+            $mb = [math]::Round($s / 1MB)
+            if ($mb -gt 50) {
+                Write-Output "$($_.Name)|$mb|$($_.FullName)"
+            }
+        }
+    }
+}
+```
+
+Run: `powershell.exe -File "$(cygpath -w /tmp/claude-cleanup/appdata_orphans.ps1)"`
+
+**With WizTree:** Instead of measuring each directory with `Get-ChildItem`, pipe discovered orphan paths to `wt_lookup.py`.
+
+Parse output. Each line is: `dirName|sizeMB|fullPath`
+
+Skip if no orphans found or total < 100 MB.
+
+**IMPORTANT:** This category requires user confirmation per-item during cleanup. Present the list of detected orphans and let the user confirm which to delete — false positives are possible (portable apps, manually installed tools). Never auto-delete orphaned AppData directories.
+
+Clean command (Step 6): `rm -rf <each confirmed orphan path>` — only after user confirms the specific items.
+
+Collect: directory names, sizes, paths.
+
+---
+
+#### Category: Windows SDK Old Versions (Windows only)
+
+**Skip if platform is not windows.**
+
+Windows SDK installs multiple versions side-by-side in `C:\Program Files (x86)\Windows Kits\10\`. Each version includes Lib, Include, and bin directories that can be 500 MB+.
+
+Write a PowerShell temp script to `/tmp/claude-cleanup/winsdk.ps1`:
+```powershell
+$sdkRoot = "${env:ProgramFiles(x86)}\Windows Kits\10"
+if (-not (Test-Path $sdkRoot)) { exit }
+
+# Check Lib versions (largest component)
+$libDir = Join-Path $sdkRoot "Lib"
+if (Test-Path $libDir) {
+    $versions = Get-ChildItem $libDir -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^\d+\.\d+\.' } |
+        Sort-Object Name
+    if ($versions.Count -gt 1) {
+        # Keep newest, report the rest
+        $old = $versions | Select-Object -SkipLast 1
+        foreach ($v in $old) {
+            # Sum size across Lib, Include, and bin for this version
+            $totalSize = 0
+            foreach ($sub in @("Lib", "Include", "bin")) {
+                $vPath = Join-Path $sdkRoot "$sub\$($v.Name)"
+                if (Test-Path $vPath) {
+                    $s = (Get-ChildItem $vPath -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+                    $totalSize += $s
+                }
+            }
+            if ($totalSize -gt 50MB) {
+                $mb = [math]::Round($totalSize / 1MB)
+                $paths = @("Lib", "Include", "bin") | ForEach-Object {
+                    $p = Join-Path $sdkRoot "$_\$($v.Name)"
+                    if (Test-Path $p) { $p }
+                }
+                Write-Output "$($v.Name)|$mb|$($paths -join ';')"
+            }
+        }
+    }
+}
+```
+
+Run: `powershell.exe -File "$(cygpath -w /tmp/claude-cleanup/winsdk.ps1)"`
+
+**With WizTree:** Pipe SDK version paths to `wt_lookup.py` instead of `Get-ChildItem`.
+
+Parse output. Each line is: `versionNumber|sizeMB|semicolonSeparatedPaths`
+
+Skip if no old versions found.
+
+**Note:** Only old SDK versions are flagged — the newest version is always kept. Projects pinned to a specific SDK version may break if that version is removed. Report which versions will be deleted so the user can make an informed choice.
+
+Clean command (Step 6): Requires elevated PowerShell:
+```powershell
+# For each old version's paths:
+Remove-Item "<sdkRoot>\Lib\<version>" -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item "<sdkRoot>\Include\<version>" -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item "<sdkRoot>\bin\<version>" -Recurse -Force -ErrorAction SilentlyContinue
+```
+
+Collect: version numbers, sizes, paths.
+
+---
+
+#### Category: Orphaned VS Installations (Windows only)
+
+**Skip if platform is not windows.**
+
+Visual Studio installations can become orphaned — directories exist in `C:\Program Files (x86)\Microsoft Visual Studio\` but the VS Installer no longer tracks them.
+
+Write a PowerShell temp script to `/tmp/claude-cleanup/vs_orphans.ps1`:
+```powershell
+$vsRoot = "${env:ProgramFiles(x86)}\Microsoft Visual Studio"
+if (-not (Test-Path $vsRoot)) { exit }
+
+$vswhere = Join-Path $vsRoot "Installer\vswhere.exe"
+$knownPaths = @()
+if (Test-Path $vswhere) {
+    $installs = & $vswhere -all -products * -format json 2>$null | ConvertFrom-Json
+    foreach ($i in $installs) { $knownPaths += $i.installationPath.ToLower() }
+}
+
+# Scan for year\edition directories
+Get-ChildItem $vsRoot -Directory -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -match '^\d{4}$' } |
+    ForEach-Object {
+        Get-ChildItem $_.FullName -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+            if ($knownPaths -notcontains $_.FullName.ToLower()) {
+                $s = (Get-ChildItem $_.FullName -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+                $mb = [math]::Round($s / 1MB)
+                if ($mb -gt 100) {
+                    Write-Output "$($_.Parent.Name) $($_.Name)|$mb|$($_.FullName)"
+                }
+            }
+        }
+    }
+```
+
+Run: `powershell.exe -File "$(cygpath -w /tmp/claude-cleanup/vs_orphans.ps1)"`
+
+**With WizTree:** Pipe discovered paths to `wt_lookup.py`.
+
+Parse output. Each line is: `displayName|sizeMB|fullPath`
+
+Skip if no orphans found.
+
+Clean command (Step 6): Requires elevated PowerShell:
+```powershell
+Remove-Item "<fullPath>" -Recurse -Force -ErrorAction SilentlyContinue
+```
+
+Collect: installation names, sizes, paths.
+
+---
+
 #### Category: App Caches (macOS + Linux only)
 
 **Skip on Windows** (other Windows-specific categories cover app bloat).
@@ -555,7 +745,7 @@ PS1
 powershell.exe -Command "Start-Process powershell.exe -ArgumentList '-File','<windows_path_to_script>' -Verb RunAs -Wait"
 ```
 
-**Categories requiring elevation:** LiveKernelReports, CBS logs, OEM logs, VS Package Cache, Delivery Optimization, Windows.old (manual only).
+**Categories requiring elevation:** LiveKernelReports, CBS logs, OEM logs, VS Package Cache, Delivery Optimization, Windows SDK old versions, Orphaned VS installations, Windows.old (manual only).
 
 **Full cleanup command reference:**
 
@@ -581,6 +771,9 @@ powershell.exe -Command "Start-Process powershell.exe -ArgumentList '-File','<wi
 | Electron app caches | `rm -rf <each cache directory path>/*` (contents only). Warn user to close affected apps first. |
 | Stale updater files | `rm -rf <each updater directory path>/*` for directories, `rm -f <path>` for individual .nupkg files. |
 | Playwright browsers | `rm -rf <ms-playwright path>/*` |
+| AppData remnants | `rm -rf <each confirmed orphan path>` — **requires per-item user confirmation** before deleting. |
+| Windows SDK old versions | **Elevated:** Remove old version dirs from `Lib\`, `Include\`, `bin\` under Windows Kits. Keep newest version. |
+| Orphaned VS installations | **Elevated:** `Remove-Item "<path>" -Recurse -Force` for each orphaned VS directory. |
 | Windows System Logs | **Elevated:** `Remove-Item "$env:SystemRoot\Logs\CBS\*" -Force; Remove-Item "$env:ProgramData\Comms\PCManager\log\*" -Recurse -Force` |
 | VS Package Cache | **Elevated:** `Remove-Item "$env:ProgramData\Microsoft\VisualStudio\Packages\*" -Recurse -Force` |
 
