@@ -35,20 +35,33 @@ If [WizTree](https://www.diskanalyzer.com/) is installed, the scan phase complet
 - Falls back to PowerShell scanning if not installed
 - Also accepts a manually-exported WizTree CSV
 
-## What It Scans (22 categories)
+## What It Scans (31 categories)
 
-Cross-platform:
+The skill detects the OS at runtime and only scans categories that apply.
+
+### Platform coverage
+
+| Platform | Status | Notes |
+|----------|--------|-------|
+| Windows (MSYS2/Git Bash) | **Validated** | All Windows-only categories including elevated cleanup, WizTree fast-scan, AppData remnants, VS / SDK orphans. |
+| Linux — Fedora (dnf/rpm) | **Validated** | Tested with the orphan scan's 4-layer filter chain (allowlist + active-binary + 30-day mtime + token-boundary package match). |
+| Linux — Debian/Ubuntu (apt) | Written, **not exercised** | Detection and clean commands present but not run against a real Debian system yet. |
+| Linux — Arch (pacman), openSUSE (zypper) | Written, **not exercised** | Same as Debian. |
+| macOS | Written, **not exercised** end-to-end | All categories present: App Caches, Trash, Dev Tool Caches, Homebrew/MacPorts cache, Chromium-family browser caches under `~/Library/Application Support/`. Symmetric to Linux but hasn't been run on a real Mac. |
+
+### Cross-platform (7)
 
 | Category | What it finds |
 |----------|---------------|
-| node_modules (inactive) | `node_modules` in projects with no git activity in 4+ weeks |
+| node_modules (inactive) | `node_modules` in projects with no git activity in 4+ weeks (resolves repo root before testing — handles monorepos with nested packages) |
 | Package manager caches | npm, pnpm, yarn global caches |
 | pip cache | Python package cache |
 | Claude Code debris | Debug logs, telemetry, old session logs (4+ weeks) |
+| Crash dumps & kernel reports | CrashDumps + LiveKernelReports (multi-GB watchdog dumps on Windows); equivalent on Linux/macOS |
 | Build artifacts | `.next/`, `.turbo/`, `.parcel-cache/`, `.vite/` in inactive projects |
 | Docker | Dangling images, build cache |
 
-Windows-specific:
+### Windows-only (13)
 
 | Category | What it finds |
 |----------|---------------|
@@ -56,23 +69,43 @@ Windows-specific:
 | Windows.old | Previous Windows installation (10-30 GB after upgrades) |
 | Delivery Optimization | Windows Update distribution cache (up to 20 GB) |
 | Windows Temp files | `%TEMP%` and `C:\Windows\Temp` |
-| Browser caches | Chrome, Edge, Firefox, Brave cache and code cache |
+| Browser caches (Windows) | Chrome, Edge, Firefox, Brave cache and code cache |
 | Electron app caches | Cache dirs in Slack, Discord, Miro, Claude Desktop, Notion, etc. |
 | Stale updater files | Applied update packages in Linear, Notion, Signal, Squirrel apps |
-| Playwright browsers | Downloaded browser binaries in `ms-playwright` |
-| Crash dumps & kernel reports | CrashDumps + LiveKernelReports (multi-GB watchdog dumps) |
+| Playwright browsers (Windows) | Downloaded browser binaries in `ms-playwright` |
 | Windows System Logs | CBS logs, OEM PC Manager logs |
 | VS Package Cache | Visual Studio installer package cache |
 | AppData remnants | Orphaned app data dirs for uninstalled programs (>50 MB, user-confirmed) |
 | Windows SDK old versions | Old SDK versions in `Windows Kits\10\` (keeps newest) |
 | Orphaned VS installations | VS directories the installer no longer tracks |
 
-macOS/Linux:
+### Unix — Linux + macOS (11)
+
+Shared (applies to both Linux and macOS):
 
 | Category | What it finds |
 |----------|---------------|
-| Crash dumps | OS crash reports |
-| App caches | Large app cache directories (>50 MB) |
+| App caches | Large cache directories under `~/.cache/` (Linux) or `~/Library/Caches/` (macOS); flags `claude-cli-nodejs` for user review since it's the running session's own cache |
+| Trash | `~/.local/share/Trash` (Linux), `~/.Trash` (macOS), and per-volume `.Trashes/<uid>` on mounted drives |
+| Dev tool caches | Cargo, Go modules (uses `go clean -modcache` for read-only handling), uv, Poetry, pip-tools, ccache, sccache, Gradle, Maven, Bun. Documents the hardlink/CAS caveat — `du` reports apparent size but `df` only reclaims when the last hardlink is gone (pair with `node_modules (inactive)` for real reclaim) |
+
+Linux-only:
+
+| Category | What it finds |
+|----------|---------------|
+| System pkg manager cache | dnf, apt, pacman, zypper caches (requires sudo to clean) |
+| journald logs | Vacuums via `journalctl --vacuum-time=30d` (requires sudo) |
+| Flatpak unused runtimes | Detects via `flatpak uninstall --unused --dry-run` |
+| Old kernels | Keeps current + previous; warns before removing on Fedora/dnf and Debian/apt |
+| Orphaned config/data dirs | `~/.config/*` and `~/.local/share/*` for uninstalled apps; 4-layer filter (allowlist + `command -v` active-binary + 30-day mtime + token-boundary package match) eliminates false-positives like `pnpm`/`claude` while still catching real orphans |
+| Browser caches (Linux Chromium-family) | Chrome, Chromium, Brave, Edge, Vivaldi, Opera under `~/.config/<browser>/` (multi-profile, three cache subtypes each) |
+
+macOS-only:
+
+| Category | What it finds |
+|----------|---------------|
+| System pkg manager cache | Homebrew (`brew cleanup -s`), MacPorts (`sudo port reclaim`, interactive) |
+| Browser caches (macOS Chromium-family) | Chrome, Chromium, Brave, Edge, Vivaldi, Arc, Opera under `~/Library/Application Support/<browser>/` (Safari and Firefox are caught by App Caches) |
 
 ## Example Output
 

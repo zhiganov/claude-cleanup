@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-Published Claude Code slash command (`/cleanup`) that scans a developer workstation for reclaimable disk space across 19 categories and lets users selectively clean them. Cross-platform: Windows, macOS, Linux. Uses WizTree for instant NTFS scanning on Windows when available.
+Published Claude Code slash command (`/cleanup`) that scans a developer workstation for reclaimable disk space across 31 categories and lets users selectively clean them. Cross-platform: Windows, macOS, Linux. Uses WizTree for instant NTFS scanning on Windows when available.
 
 Repo: `zhiganov/claude-cleanup`. Install: `npx skillsadd zhiganov/claude-cleanup`.
 
@@ -24,7 +24,7 @@ The command instructs Claude Code through 7 steps:
 1. Detect platform (`uname -s`) and measure disk space
 2. Detect workspace root (walk up to find `.claude/`)
 2.5. **WizTree fast scan** (Windows only) — if WizTree is installed, export CSV for instant size lookups; also accepts manually-exported CSVs
-3. Scan 19 categories in parallel — uses WizTree data when available, falls back to PowerShell
+3. Scan up to 31 categories in parallel (only those matching the detected platform fire) — uses WizTree data when available on Windows, falls back to PowerShell. On Linux/macOS, categories are grouped into Cross-platform / Windows-only / Unix sections; runtime guards skip non-applicable ones.
 4. Display report table sorted by size
 5. User selects categories to clean (or `--dry-run` stops here)
 6. Execute cleanup — elevated categories batched into single UAC prompt
@@ -39,6 +39,10 @@ The command instructs Claude Code through 7 steps:
 - **`dist/` is only cleaned if gitignored** — many projects commit `dist/` as published output.
 - **Docker: `docker image prune` + `docker builder prune` only** — never `docker system prune` (removes stopped containers).
 - **Claude Code safety:** Never touch `memory/`, `commands/`, `skills/`, `settings*.json`, `history.jsonl`.
+- **Hook-safe deletion (Linux/macOS):** Many safety hooks block `rm -rf` against paths starting with `/` or `~`. Use `find <path> -mindepth 1 -delete && rmdir <path>` instead — same result, no pattern collision, errors on typos rather than recursing.
+- **Inactivity check resolves repo root:** For nested packages in monorepos (e.g. `repo/server/node_modules` with `.git` at `repo/`), the inactivity check runs `git rev-parse --show-toplevel` before testing the log window. Testing the subpackage path directly silently false-positives.
+- **Orphan-scan filter chain (Linux):** 4-layer filter — allowlist + `command -v` active-binary + 30-day mtime + token-boundary package match. Substring matching produces real-world false-negatives (e.g. `zenity` would swallow `zen` and skip a real orphan), so the match requires `pkg == name` or `pkg == name-*` or `pkg == *-name` etc.
+- **Hardlink/CAS caveat:** Bun and pnpm caches use content-addressed stores with hardlinks into project `node_modules`. `du` reports apparent size from the cache's perspective, but `df` reclaims only when the last hardlink is gone — pair cache cleanup with the `node_modules (inactive)` category for real reclaim.
 
 ## Modifying the Command
 
