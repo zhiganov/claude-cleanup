@@ -27,6 +27,10 @@ irm https://raw.githubusercontent.com/zhiganov/claude-cleanup/master/install.ps1
 /cleanup --dry-run    # scan and report only
 ```
 
+## Portable variant (no install)
+
+A slimmer, harness-agnostic version lives as a [public gist](https://gist.github.com/zhiganov/c8b611bd27e90979068051bd371f0d95) — paste it into any LLM with shell access (Claude Code, Cursor, Codex, ChatGPT with code interpreter). Unix-first, Windows in an appendix, no embedded PowerShell. Source: [`cleanup-gist.md`](./cleanup-gist.md) in this repo.
+
 ## WizTree Acceleration (Windows)
 
 If [WizTree](https://www.diskanalyzer.com/) is installed, the scan phase completes in seconds instead of minutes. WizTree reads the NTFS Master File Table directly for instant directory sizes.
