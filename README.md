@@ -39,6 +39,10 @@ If [WizTree](https://www.diskanalyzer.com/) is installed, the scan phase complet
 - Falls back to PowerShell scanning if not installed
 - Also accepts a manually-exported WizTree CSV
 
+## Windows helper scripts
+
+On Windows the scan and delete steps are backed by committed helper scripts in [`scripts/windows/cleanup/`](./scripts/windows/cleanup/) — a size lookup over the WizTree CSV, the `node_modules` / build-artifact finder, the elevated WizTree export, the orphan/old-version discovery scripts, and a hook-safe batch deleter. The installers place these in `~/.claude/cleanup-scripts/` and the command resolves them automatically. macOS/Linux runs need no helper scripts.
+
 ## What It Scans (31 categories)
 
 The skill detects the OS at runtime and only scans categories that apply.
