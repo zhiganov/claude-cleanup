@@ -1,1 +1,6 @@
 node_modules/
+
+# Local /cleanup test debris (Windows diagnostic dumps), never to be committed
+*.evtx
+dism log.log
+*.log
