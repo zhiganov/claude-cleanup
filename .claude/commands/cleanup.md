@@ -179,6 +179,7 @@ For each candidate:
    - **Fallback Windows:** PowerShell `Get-ChildItem` with `-Recurse -File | Measure-Object -Property Length -Sum`
    - **macOS/Linux:** `du -sm <path>/node_modules | cut -f1` (size in MB)
 4. Skip if size < 10 MB
+5. **Skip if it backs a live MCP server.** If the project dir is referenced by a registered stdio MCP server's `args` path in `~/.claude.json` (e.g. `book-power-output/mcp/<slug>/` whose server runs `node …/dist/index.js`), never delete its `node_modules` — the project can have no recent git activity yet still need those deps to start. `find_targets.py` filters these out automatically; apply the same rule in the no-WizTree fallback walk. (Two book-power MCPs broke with `-32000` after a cleanup wiped their deps, 2026-06-29.)
 
 Only report **top-level** `node_modules` per project (not nested ones inside `node_modules/`).
 
@@ -521,6 +522,40 @@ Remove-Item "$env:ProgramData\Microsoft\VisualStudio\Packages\*" -Recurse -Force
 ```
 
 **Note:** After cleaning, VS component modifications/repairs will need to re-download packages. This is fine for normal use.
+
+Collect: size.
+
+---
+
+#### Category: WinSxS Component Store (Windows only)
+
+**Skip if platform is not windows.**
+
+The Windows component store (`C:\Windows\WinSxS`) accumulates **superseded** update components — old package versions kept as rollback backups after Windows Updates. `StartComponentCleanup` removes them safely (Microsoft-supported); it never touches in-use components.
+
+WizTree reports the raw `C:\Windows\WinSxS` size (~10 GB is normal on a mature install), but most of that is hard-linked into the live system and is **not** reclaimable — never report the raw WinSxS size as the reclaim. Get the real number from DISM, which requires elevation:
+
+```
+dism.exe /Online /Cleanup-Image /AnalyzeComponentStore
+```
+
+Parse "Actual Size of Component Store", "Backups and Disabled Features" (where the reclaimable superseded packages live), "Number of Reclaimable Packages", and "Component Store Cleanup Recommended". Realistic reclaim is the superseded-package portion (often 1-4 GB), not the full backups figure. Run the analyze step inside the elevated WizTree pass, or as a one-off elevated probe (write the output to a file and read it back, since `Start-Process -Verb RunAs` loses stdout). Report the reclaim estimate, not the raw store size. Skip the category if Cleanup Recommended is No or 0 reclaimable packages.
+
+Clean command (Step 6): **Elevated.** `dism.exe /Online /Cleanup-Image /StartComponentCleanup` (runs a few minutes). Do **not** add `/ResetBase` unless the user accepts losing the ability to uninstall already-installed Windows updates.
+
+Collect: actual store size, reclaimable-package count, recommended flag, reclaim estimate.
+
+---
+
+#### Category: Config.Msi Leftovers (Windows only)
+
+**Skip if platform is not windows.**
+
+`C:\Config.Msi` holds Windows Installer rollback/transaction data. It is transient during an install, but aborted or large installs leave it behind at multi-GB. Windows recreates it on demand, so a leftover is safe to remove **when no install or update is in progress**.
+
+Measure `C:\Config.Msi` (WizTree or fallback PowerShell). Skip if it does not exist or is < 100 MB.
+
+Clean command (Step 6): **Elevated.** `Remove-Item "C:\Config.Msi" -Recurse -Force` — run via the elevated batch / a `.ps1` file, not inline, since the path-protection hook blocks inline system-path deletes.
 
 Collect: size.
 
@@ -946,7 +981,7 @@ The `find -delete` form is at least as safe (it errors on typos rather than recu
 
 **Hook-safe deletion (Windows):** This workstation has a path-protection PreToolUse hook that blocks inline `Remove-Item` and `cmd /c rmdir /s /q` targeting `%LOCALAPPDATA%` / `%USERPROFILE%` / system paths ("Remove-Item on system path … is blocked"; it even misparses flags like `/s` as a path), and a block aborts the **whole** command so nothing in it runs. The committed **`scrub.ps1`** (see *Helper scripts*) is the supported path: write the target paths (one per line) to a list file, then `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$CLEANUP_SCRIPTS/scrub.ps1")" -ListFile "$(cygpath -w <listfile>)"`. The launcher carries no delete keywords so the hook passes; `scrub.ps1` reports `OK`/`PARTIAL`/`FAIL`/`SKIP` per path and uses `rmdir /s /q` for dir trees. User-owned targets (node_modules, `%LOCALAPPDATA%` app caches, the scratch dir) need no elevation this way; only `C:\Windows\*` paths need the elevated variant below.
 
-**NEVER pass `npm-cache` to `scrub.ps1`.** `%LOCALAPPDATA%\npm-cache\_npx\` is where `npx -y <pkg>` materialises packages, and **live MCP servers execute from inside it** — on a machine running Claude Code you will typically find `node …\npm-cache\_npx\…\harmonica-mcp\dist\index.js` (and context7, shadcn, etc.) in the process list, once per running session. A whole-directory `rmdir /s /q` deletes those servers' code out from under every running session. Use **`npm cache clean --force`** (Step 6 table) — it prunes `_cacache` and leaves `_npx` intact. It is slower, and that is the price. Observed 2026-07-16: `scrub.ps1` on npm-cache returned `FAIL: Access to the path is denied` **because** two sessions' MCP servers held it open; the lock was the only thing preventing the damage. Do not "fix" that failure by retrying harder or killing the holder. If you must hand-roll a delete script instead, write it with the Write tool (not a shell heredoc) so its delete commands never hit the hook, and never name the worker function `Del`/`RD`/`RM`.
+**NEVER pass `npm-cache` to `scrub.ps1`.** `%LOCALAPPDATA%\npm-cache\_npx\` is where `npx -y <pkg>` materialises packages, and **live MCP servers execute from inside it** — on a machine running Claude Code you will typically find `node …\npm-cache\_npx\…\harmonica-mcp\dist\index.js` (and context7, shadcn, etc.) in the process list, once per running session. A whole-directory `rmdir /s /q` deletes those servers' code out from under every running session. Use **`npm cache clean --force`** (Step 6 table) — it prunes `_cacache` and leaves `_npx` intact. It is slower, and that is the price. Observed 2026-07-16: `scrub.ps1` on npm-cache returned `FAIL: Access to the path is denied` **because** two sessions' MCP servers held it open; the lock was the only thing preventing the damage. Do not "fix" that failure by retrying harder or killing the holder. This is the same failure class as the live-MCP-server rule in the node_modules category — `_npx` is its `%LOCALAPPDATA%` twin. If you must hand-roll a delete script instead, write it with the Write tool (not a shell heredoc) so its delete commands never hit the hook, and never name the worker function `Del`/`RD`/`RM`.
 
 **Alias trap (Windows/PowerShell):** `del`, `rd`, and `rm` are aliases for `Remove-Item`, and aliases outrank functions in command resolution. Never name a delete-helper function `Del` / `RD` / `RM` — the alias shadows it, the function body (delete + logging) silently never runs, and it looks like it "succeeded" (sub-second, no freed space, missing log lines). Use a non-aliased name such as `Scrub`. Inside the `.ps1`, `cmd /c rmdir /s /q "<path>"` is fastest for whole-dir removal (e.g. a superseded Squirrel `app-*` version, or an inactive project's `node_modules`); use `Remove-Item "<dir>\*" -Recurse -Force` for contents-only where the dir must survive (e.g. `C:\Windows\Temp`). **Do not reach for the fast whole-dir form on `npm-cache`** — see the `_npx` warning above; that directory hosts running MCP servers and must go through `npm cache clean --force` instead.
 
@@ -959,7 +994,7 @@ PS1
 powershell.exe -Command "Start-Process powershell.exe -ArgumentList '-File','<windows_path_to_script>' -Verb RunAs -Wait"
 ```
 
-**Categories requiring elevation:** LiveKernelReports, CBS logs, OEM logs, VS Package Cache, Delivery Optimization, Windows SDK old versions, Orphaned VS installations, Windows.old (manual only).
+**Categories requiring elevation:** LiveKernelReports, CBS logs, OEM logs, VS Package Cache, Delivery Optimization, Windows SDK old versions, Orphaned VS installations, WinSxS component cleanup, Config.Msi leftovers, Windows.old (manual only).
 
 **Full cleanup command reference:**
 
@@ -990,6 +1025,8 @@ powershell.exe -Command "Start-Process powershell.exe -ArgumentList '-File','<wi
 | Orphaned VS installations | **Elevated:** `Remove-Item "<path>" -Recurse -Force` for each orphaned VS directory. |
 | Windows System Logs | **Elevated:** `Remove-Item "$env:SystemRoot\Logs\CBS\*" -Force; Remove-Item "$env:ProgramData\Comms\PCManager\log\*" -Recurse -Force` |
 | VS Package Cache | **Elevated:** `Remove-Item "$env:ProgramData\Microsoft\VisualStudio\Packages\*" -Recurse -Force` |
+| WinSxS component store | **Elevated:** size via `dism.exe /Online /Cleanup-Image /AnalyzeComponentStore` first, then `dism.exe /Online /Cleanup-Image /StartComponentCleanup`. No `/ResetBase` unless the user accepts losing update-uninstall. |
+| Config.Msi leftovers | **Elevated:** `Remove-Item "C:\Config.Msi" -Recurse -Force` (only when no install is in progress). |
 | System pkg manager cache (Linux) | **Requires sudo.** dnf: `sudo dnf clean all` · apt: `sudo apt clean` · pacman: `sudo pacman -Sc --noconfirm` · zypper: `sudo zypper clean --all` |
 | journald logs (Linux) | **Requires sudo.** `sudo journalctl --vacuum-time=30d` (or `--vacuum-size=200M` for hard cap) |
 | Flatpak unused runtimes (Linux) | `flatpak uninstall --unused -y` (system installs prompt for sudo) |
