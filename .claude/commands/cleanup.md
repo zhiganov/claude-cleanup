@@ -276,7 +276,17 @@ Collect: file count, total size, paths, breakdown by location.
 
 Use the **same inactivity check** as the node_modules category (no git commits in 4 weeks, or no `.git` directory).
 
-**With a WizTree CSV**, the `artifact:<name>|<mb>|<path>` lines emitted by `find_targets.py` (run once in the node_modules category) already list every `.next`/`.turbo`/`.parcel-cache`/`.vite` dir ≥10 MB under the workspace — just keep the ones whose project is inactive. Otherwise scan inactive projects for these directories:
+**Then apply a build-freshness guard — git inactivity does NOT mean the artifact is cold.** Before flagging any artifact dir, check the newest file inside it and **skip the dir if anything was modified in the last 24 hours**. A project with no commits in a month can still be mid-build *right now*: another Claude Code session, a file watcher, or a running dev server writes into `.next`/`.vite` continuously without ever touching git. The git check answers "is anyone developing this?"; it cannot answer "is anyone building this?" — and only the second question matters for a build dir.
+
+- **macOS/Linux:** `find <dir> -mtime -1 -print -quit 2>/dev/null | grep -q .` — bail on first hit, don't traverse the whole tree.
+- **Windows:** `(Get-ChildItem <dir> -Recurse -File -EA SilentlyContinue | Measure-Object LastWriteTime -Maximum).Maximum` — skip if within 24h.
+- **With a WizTree CSV:** the CSV carries a modified timestamp per row — read it from there rather than re-walking the tree.
+
+Report skipped-as-fresh dirs in the scan output (`<path> — SKIPPED, built <N> min ago`) rather than dropping them silently, so a surprising skip is visible rather than looking like the dir doesn't exist.
+
+**Do not override this guard by reasoning that the artifact is "just a regenerable cache."** That rationalisation is the failure mode, not an exception to the rule: regenerating it out from under a running build is precisely the damage. Observed 2026-07-16 — a 1.4 GB `.next` was flagged INACTIVE by the git check and offered for deletion while another agent's build was 11 minutes old; 1,250 of its 1,279 files had been written minutes earlier. Same failure class as the live-MCP-server rule in the node_modules category: **a git-cold project can hold red-hot files.**
+
+**With a WizTree CSV**, the `artifact:<name>|<mb>|<path>` lines emitted by `find_targets.py` (run once in the node_modules category) already list every `.next`/`.turbo`/`.parcel-cache`/`.vite` dir ≥10 MB under the workspace — just keep the ones whose project is inactive **and pass the freshness guard above**. Otherwise scan inactive projects for these directories:
 - `.next/`
 - `.turbo/`
 - `.parcel-cache/`
