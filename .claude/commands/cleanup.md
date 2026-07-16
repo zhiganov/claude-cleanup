@@ -89,7 +89,8 @@ fi
 | `run_wiztree.ps1 -WizTree <exe> -OutCsv <winpath>` | Elevated WizTree MFT export (one UAC) |
 | `squirrel.ps1` | Discover Squirrel old `app-*` versions |
 | `appdata_orphans.ps1` / `winsdk.ps1` / `vs_orphans.ps1` | Windows orphan / old-version discovery |
-| `assert_list.py <list> --require L=SUB --forbid L=SUB` | **Gate before `scrub.ps1`** — buckets the list, fails on a missing/forbidden/unclassified entry |
+| `live_paths.ps1 [-Summary]` | Paths RUNNING processes depend on (stdout); session + MCP-server census on stderr |
+| `assert_list.py <list> --require L=SUB --forbid L=SUB --live <paths>` | **Gate before `scrub.ps1`** — buckets the list, fails on a missing/forbidden/unclassified/live entry |
 | `scrub.ps1 -ListFile <file>` | Hook-safe batch deleter (one path per line) |
 
 PowerShell helpers: `powershell.exe -NoProfile -File "$(cygpath -w "$CLEANUP_SCRIPTS/<name>.ps1")" …`. Python helpers: `python "$CLEANUP_SCRIPTS/<name>.py" …`. Always pass the CSV path and workspace root as **command-line arguments** (MSYS converts those). If `$CLEANUP_SCRIPTS` can't be resolved, fall back to each category's per-path PowerShell/`du` sizing — but the committed files are the supported path; do not re-author them inline.
@@ -118,6 +119,22 @@ Measure current disk space ("before" snapshot for the final summary):
 - **macOS/Linux:** Run `df -h /` and parse the output for free space, total size, and usage percentage.
 
 Store the "before" free space value for the summary.
+
+**Take a session census (Windows).** Run `powershell.exe -NoProfile -File "$(cygpath -w "$CLEANUP_SCRIPTS/live_paths.ps1")" -Summary > /dev/null` and report the stderr census to the user before scanning:
+
+```
+claude code sessions live: 2
+  pid=25656  mcp_servers=12  session=deliberation loop
+  pid=21948  mcp_servers=12  session=Avails - standing availability epic
+```
+
+Concurrency is a **safety** condition, not just an accounting nuisance. Each extra session brings its own set of MCP servers executing from `npm-cache\_npx`, its own `%TEMP%\claude` scratch, and its own builds landing in projects whose git looks cold. When the census shows more than one session:
+
+- Say so in the Step 4 report — the user should know another agent may be mid-flight.
+- Treat every "is this dead?" judgement as unreliable and lean on `--live` (Step 6), not on git or the registry.
+- Do **not** try to make the other session's files safe by killing anything. Never blanket-kill `node`/`node.exe` — that is what MCP servers are.
+
+*Measured 2026-07-16:* two sessions live, **12 MCP servers each**, all 24 correctly attributed to their owning `claude.exe` by parent chain. This is not a rare condition — assume another session exists.
 
 ### Step 2: Detect Workspace Root
 
@@ -1072,19 +1089,38 @@ The `find -delete` form is at least as safe (it errors on typos rather than recu
 
 **Hook-safe deletion (Windows):** This workstation has a path-protection PreToolUse hook that blocks inline `Remove-Item` and `cmd /c rmdir /s /q` targeting `%LOCALAPPDATA%` / `%USERPROFILE%` / system paths ("Remove-Item on system path … is blocked"; it even misparses flags like `/s` as a path), and a block aborts the **whole** command so nothing in it runs. The committed **`scrub.ps1`** (see *Helper scripts*) is the supported path: write the target paths (one per line) to a list file, then `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$CLEANUP_SCRIPTS/scrub.ps1")" -ListFile "$(cygpath -w <listfile>)"`. The launcher carries no delete keywords so the hook passes; `scrub.ps1` reports `OK`/`PARTIAL`/`FAIL`/`SKIP` per path and uses `rmdir /s /q` for dir trees. User-owned targets (node_modules, `%LOCALAPPDATA%` app caches, the scratch dir) need no elevation this way; only `C:\Windows\*` paths need the elevated variant below.
 
-**Filter paths with `grep -F`, never bare `grep`.** Windows paths are backslash-laden and every regex-flavoured tool reads a backslash as an escape. `grep -v '\Claude\'` does not exclude Claude — it **errors** with `grep: Trailing backslash` and matches nothing, and when the output is redirected the exit status is lost, so it appends nothing and looks fine. Use `grep -vF` / `grep -cF` (fixed-string) for **all** path filtering. The same trap has a Python cousin: `r'\Claude\'` is a SyntaxError (a raw string cannot end in a backslash) — use `chr(92)` to build the separator, and pass paths as **argv** so MSYS converts them (a `/tmp/...` literal inside a script is not converted).
+**Filter paths with `grep -F`, never bare `grep` — and never `grep -iF`.** Windows paths are backslash-laden and every regex-flavoured tool reads a backslash as an escape. `grep -v '\Claude\'` does not exclude Claude — it **errors** with `grep: Trailing backslash` and matches nothing, and when the output is redirected the exit status is lost, so it appends nothing and looks fine. Use `grep -vF` / `grep -cF` (fixed-string) for **all** path filtering.
+
+**`grep -i -F` aborts on this platform.** GNU grep 3.0 as shipped in Git for Windows (`/usr/bin/grep`, and `fgrep`, which *is* `grep -F`) dies with **SIGABRT / exit 134** whenever `-i` and `-F` are combined — for *any* input, including `echo hello | grep -c -i -F hello`. It is the flag combination, not the pattern, the file, or CRLF. This matters more than a normal crash: an abort inside a list-building pipeline emits **nothing**, and nothing is exactly what the silent-omission bug looks like. Measured on the same file, same pattern:
+
+| invocation | result |
+|---|---|
+| `grep -cF '\_npx'` | `3` — correct |
+| `grep -ci '\_npx'` | `0` — silently wrong (backslash eaten as an escape) |
+| `grep -c '\_npx'` | `0` — silently wrong |
+| `grep -ciF '\_npx'` | **abort, exit 134, no output** |
+
+So: **`-F` without `-i`.** Windows paths from the same source have stable casing, so case-sensitivity is rarely the problem it looks like. If you genuinely need case-insensitive fixed-string matching, do it in **Python** (`a.lower() in b.lower()`) or PowerShell (`-like`), never in grep — `assert_list.py` matches case-insensitively for exactly this reason.
+
+The same trap has a Python cousin: `r'\Claude\'` is a SyntaxError (a raw string cannot end in a backslash) — use `chr(92)` to build the separator, and pass paths as **argv** so MSYS converts them (a `/tmp/...` literal inside a script is not converted).
 
 **Assert the list with `assert_list.py` before every `scrub.ps1` call. Never delete off an unverified list.**
 
 ```bash
+powershell.exe -NoProfile -File "$(cygpath -w "$CLEANUP_SCRIPTS/live_paths.ps1")" > /tmp/claude-cleanup/live.txt
 python "$CLEANUP_SCRIPTS/assert_list.py" "$(cygpath -w <listfile>)" \
   --require 'electron cache=\AppData\Roaming\' \
   --require 'user temp=\AppData\Local\Temp\' \
   --forbid  'Claude cache=\Claude\' \
-  --forbid  'CC scratch=\Temp\claude\'   || exit 1
+  --forbid  'CC scratch=\Temp\claude\' \
+  --live    "$(cygpath -w /tmp/claude-cleanup/live.txt)"   || exit 1
 ```
 
 One `--require` per category the user selected, one `--forbid` per thing you excluded by hand. It fails on a require bucket matching **0** lines, on any forbid hit, on an empty list, and on any line matching no bucket. **A selected category showing `0` is a bug, not a clean bill of health** — that is the whole point.
+
+**`--live` is the liveness veto.** `live_paths.ps1` reads the process list and emits every path a running process depends on; `assert_list.py` fails any target that is an *ancestor* of one. This is the only non-proxy signal available: git inactivity, registry absence and "no lockfile" all mean "probably dead", and on 2026-07-16 they were wrong five times in one run — four caught by a **file lock rather than by judgement**. Verified against that run's sharpest case: a whole-dir `npm-cache` target is vetoed because 3 live MCP servers execute from `_npx` beneath it (once per session), which is precisely what `Access denied` accidentally prevented.
+
+It does **not** subsume `find_targets.py`'s `backs_mcp_server()`. A book-power MCP runs from `<project>\dist\index.js`, so nothing live sits under its sibling `node_modules` — the veto sees nothing there, while `backs_mcp_server()` protects it by knowing the project owns a registered server. Keep both.
 
 *Why a committed script and not an inline check* (2026-07-16): the run **did** verify, and the verification was broken **the same way as the bug**. `grep -v '\Claude\'` silently appended nothing, so the entire Electron category — 42 dirs, ~1.4 GB, the largest selection — vanished from the delete list while `wc -l` reported a healthy 197 lines. The check `grep -c 'AppData\Roaming' "$LIST"` then died on the identical trailing backslash and printed `0` next to a "must be 0" row for a *different* category, so the wrong answer read as a passing test. A check that fails identically to the thing it checks is worse than no check. `assert_list.py` matches fixed-string off argv, in code, and is regression-tested against that exact 197-line list.
 

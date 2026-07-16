@@ -10,7 +10,7 @@ Write-Host "Installed cleanup.md -> ~/.claude/commands/"
 # Windows helper scripts used by the scan/delete steps. The command resolves
 # these from ~/.claude/cleanup-scripts/ when present.
 New-Item -ItemType Directory -Force -Path "$ClaudeDir\cleanup-scripts" | Out-Null
-$scripts = @('wt_lookup.py','find_targets.py','assert_list.py','diskspace.ps1','run_wiztree.ps1','squirrel.ps1',
+$scripts = @('wt_lookup.py','find_targets.py','assert_list.py','live_paths.ps1','diskspace.ps1','run_wiztree.ps1','squirrel.ps1',
              'appdata_orphans.ps1','winsdk.ps1','vs_orphans.ps1','scrub.ps1','README.md')
 foreach ($f in $scripts) {
   Invoke-WebRequest -Uri "$RepoUrl/scripts/windows/cleanup/$f" -OutFile "$ClaudeDir\cleanup-scripts\$f"

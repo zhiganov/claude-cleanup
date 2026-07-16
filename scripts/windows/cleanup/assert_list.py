@@ -4,6 +4,7 @@
 Usage:
     python assert_list.py <listfile> [--require LABEL=SUBSTR]...
                                      [--forbid  LABEL=SUBSTR]...
+                                     [--live LIVEPATHSFILE]
                                      [--allow-unclassified]
 
 Pass the list path as a command-line argument (MSYS converts argv, not paths
@@ -27,10 +28,39 @@ read as a passing test.
 A check that fails identically to the thing it checks is worse than no check.
 So: assert composition here, in code, off argv, with fixed strings.
 
+--live takes the output of live_paths.ps1 (paths that RUNNING processes depend
+on) and vetoes any target that is an ancestor of one. Git inactivity, registry
+absence and "no lockfile" are proxies for dead; a path in a live process's
+command line is the real thing. On 2026-07-16 four of five near-misses were
+caught by a file lock rather than by judgement -- npm-cache is the sharpest: a
+whole-dir delete would have taken out 3 live MCP servers' code, once per
+session, and only "Access denied" stopped it.
+
+--live does NOT subsume find_targets.py's backs_mcp_server(). A book-power MCP
+runs from <project>\\dist\\index.js, so no live path sits under its sibling
+node_modules -- the veto sees nothing, while backs_mcp_server() protects it by
+knowing the project owns a registered server. Both checks are needed.
+
 Exit 0 = PASS, 1 = FAIL. A --require bucket matching 0 lines is a FAIL --
 a category the user selected showing zero is a bug, not a clean bill of health.
 """
 import sys
+
+BS = chr(92)  # never a raw string: r'...\' is a SyntaxError
+
+
+def norm(p):
+    return p.strip().replace('/', BS).rstrip(BS).lower()
+
+
+def parse_flag(args, flag):
+    """Value of `--flag VALUE`, or None."""
+    if flag in args:
+        i = args.index(flag)
+        if i + 1 >= len(args):
+            sys.exit(f"assert_list: {flag} needs a value")
+        return args[i + 1]
+    return None
 
 
 def parse_pairs(args, flag):
@@ -126,6 +156,32 @@ def main(argv):
                 f"{len(stray)} line(s) match no expected bucket -- account for them "
                 f"or pass --allow-unclassified"
             )
+
+    livefile = parse_flag(rest, '--live')
+    if livefile:
+        try:
+            with open(livefile, encoding='utf-8') as fh:
+                live = [norm(l) for l in fh if l.strip()]
+        except OSError as e:
+            sys.exit(f"assert_list: cannot read --live file {livefile}: {e}")
+        print(f"\n  liveness veto ({len(live)} live paths):")
+        vetoed = 0
+        for ln in lines:
+            t = norm(ln)
+            if not t:
+                continue
+            hits = [l for l in live if l == t or l.startswith(t + BS)]
+            if hits:
+                vetoed += 1
+                print(f"    ** LIVE ** {ln}")
+                for h in hits[:2]:
+                    print(f"        <- {h}")
+                failures.append(
+                    f"{ln!r} is an ancestor of {len(hits)} path(s) a RUNNING process "
+                    f"depends on -- deleting it removes live code"
+                )
+        if not vetoed:
+            print("    none — no target holds a running process's code")
 
     dupes = len(lines) - len(set(lower))
     if dupes:
