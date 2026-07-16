@@ -29,7 +29,22 @@ Parse `$ARGUMENTS`: if it contains `--dry-run`, operate in report-only mode (ski
 The Windows scan/delete helpers are **committed files** — do NOT re-author them as inline heredocs. Backslash literals get mangled inside a heredoc, and a hardcoded `/tmp/...` path inside a script is not MSYS-converted (only command-line arguments are); both bit on 2026-06-26. They live in one of three layouts depending on how `/cleanup` was installed: `scripts/windows/cleanup/` in a standalone `claude-cleanup` checkout, `~/.claude/cleanup-scripts/` when installed via `install.sh`/`install.ps1`, or `claude-config/scripts/windows/cleanup/` in the synced workspace. Resolve the directory once at the start of the run:
 
 ```bash
-root="$PWD"; while [ "$root" != "/" ] && [ ! -e "$root/.claude" ]; do root="$(dirname "$root")"; done
+# Workspace root = the OUTERMOST ancestor containing .claude, EXCLUDING $HOME.
+# Not the innermost: subprojects carry their own .claude, and stopping at the first
+# one silently scopes every workspace category to a subtree (see Step 2).
+# Not the plain outermost either: ~/.claude is the user-level config, not a workspace
+# marker, so "take the last hit" resolves to $HOME. Both traps are real; see Step 2.
+resolve_root() {
+  local d best home
+  home="$(cd "$HOME" 2>/dev/null && pwd -P)"
+  d="$(pwd -P)"; best=""
+  while [ -n "$d" ] && [ "$d" != "/" ]; do
+    if [ -e "$d/.claude" ] && [ "$d" != "$home" ]; then best="$d"; fi
+    d="$(dirname "$d")"
+  done
+  printf '%s\n' "${best:-$(pwd -P)}"
+}
+root="$(resolve_root)"
 CLEANUP_SCRIPTS=""
 for cand in "$root/claude-config/scripts/windows/cleanup" "$root/scripts/windows/cleanup" "$HOME/.claude/cleanup-scripts"; do
   [ -f "$cand/wt_lookup.py" ] && CLEANUP_SCRIPTS="$cand" && break
@@ -106,12 +121,37 @@ Store the "before" free space value for the summary.
 
 ### Step 2: Detect Workspace Root
 
-Determine the workspace root for scanning node_modules and build artifacts:
-- Walk up from the current working directory to find a directory containing `.claude/`
-- If found, that directory is the workspace root
-- If not found, use the current working directory
+Use the `resolve_root` function from *Helper scripts* — **do not re-derive this walk inline.** `$WORKSPACE_ROOT` is the `root` it returns; it feeds the node_modules and build-artifact categories and the `$CLEANUP_SCRIPTS` probe.
 
-Store this path as `$WORKSPACE_ROOT` — it is used for node_modules and build artifact categories (and matches the `root` resolved in *Helper scripts*).
+The rule is: **the outermost ancestor containing `.claude`, excluding `$HOME`.** Both halves matter, and each corresponds to a real failure:
+
+- **Not the innermost.** Subprojects carry their own `.claude/`. Stopping at the first hit scopes every workspace category to whatever subtree you happen to be standing in. On 2026-07-16 the session had `cd`'d into `claude-project/scenius-digest` for an unrelated task, so the walk halted there and the real root — `claude-project` — was never reached. **The failure is silent: no error, just a small number**, which reads as a clean workspace rather than a mis-scoped scan. Worse, candidates 1 and 2 of the `$CLEANUP_SCRIPTS` probe are `$root`-relative, so a mis-scoped root falls through to `~/.claude/cleanup-scripts` — whatever `install.sh` last downloaded, which on that run was a `find_targets.py` with no live-MCP filter. A wrong root doesn't just under-report; **it can silently swap the safety-filtered script for an unfiltered one.**
+- **Not the plain outermost either.** `~/.claude` **is** a `.claude` directory, so "keep walking and take the last hit" resolves the root to **`$HOME`** — verified, not hypothetical. That is worse than the bug it fixes: `find_targets.py` filters purely by path prefix, so a `$HOME` root sweeps `AppData/Roaming/npm/node_modules` (globally installed CLIs), `AppData/Local/Microsoft/TypeScript/*/node_modules` (the LSP), and `npm-cache/_npx/*/node_modules` (**live MCP servers**). None have a `.git`, so all read as inactive and get offered. `backs_mcp_server()` rescues the `_npx` ones; nothing rescues your global npm packages or the TypeScript LSP.
+
+**Announce the resolution, and name the subproject you walked past** — a root that surprises the user must be visible, since the whole failure mode is silence:
+
+```bash
+echo "workspace root : $root"
+nearest="$(pwd -P)"; while [ "$nearest" != "/" ] && [ ! -e "$nearest/.claude" ]; do nearest="$(dirname "$nearest")"; done
+[ -n "$nearest" ] && [ "$nearest" != "/" ] && [ "$nearest" != "$root" ] && \
+  echo "  note: nearer .claude at $nearest (subproject) — scanning the WHOLE workspace, not just it"
+```
+
+**Guard against profile-wide roots.** If `resolve_root` falls back to the cwd and that cwd is `$HOME`, a drive root, or `/`, the workspace-scoped categories would enumerate the user profile. Skip them — the rest of the run is still valid:
+
+```bash
+home="$(cd "$HOME" && pwd -P)"; WORKSPACE_SCOPED=1
+case "$root" in
+  "$home"|/|/[a-z])
+    echo "WARNING: workspace root resolved to '$root' — node_modules and build-artifact"
+    echo "         categories would enumerate AppData (global npm packages, the TypeScript"
+    echo "         LSP, npm-cache/_npx live MCP servers). SKIPPING those two categories."
+    echo "         cd into the workspace and re-run if you wanted them."
+    WORKSPACE_SCOPED=0;;
+esac
+```
+
+If `$WORKSPACE_SCOPED` is 0, skip the node_modules and Build Artifacts categories and say so in the report. Do **not** substitute a narrower root to make them run.
 
 ### Step 2.5: WizTree Fast Scan (Windows only)
 
