@@ -37,6 +37,35 @@ done
 [ -n "$CLEANUP_SCRIPTS" ] || CLEANUP_SCRIPTS="$(dirname "$(find "$root" "$HOME/.claude" -maxdepth 7 -path '*/wt_lookup.py' 2>/dev/null | grep -i cleanup | head -1)")"
 ```
 
+**Say which copy you resolved, then check it against canonical. Refuse to run on drift.**
+
+These files exist in more than one place, all writable, and the resolver silently picks by order — so the run can execute a copy that is months behind the one you last edited, and nothing says so. Print the resolution, and on a machine that holds both checkouts, compare them:
+
+```bash
+echo "CLEANUP_SCRIPTS = $CLEANUP_SCRIPTS"
+
+# Maintainer machines carry two checkouts: claude-config (canonical, loaded via the
+# <workspace>/.claude/commands junction) and claude-cleanup (what install.sh publishes).
+cc="$root/claude-config"; cl="$root/claude-cleanup"
+same() { diff -q --strip-trailing-cr "$1" "$2" >/dev/null 2>&1; }   # NOT cmp — see below
+if [ -d "$cc" ] && [ -d "$cl" ]; then
+  drift=0
+  same "$cc/commands/cleanup.md" "$cl/.claude/commands/cleanup.md" || { echo "DRIFT: cleanup.md"; drift=1; }
+  for f in "$cc/scripts/windows/cleanup"/*.py "$cc/scripts/windows/cleanup"/*.ps1; do
+    [ -e "$f" ] || continue
+    same "$f" "$cl/scripts/windows/cleanup/$(basename "$f")" || { echo "DRIFT: $(basename "$f")"; drift=1; }
+  done
+  [ "$drift" -eq 0 ] && echo "provenance OK — canonical == published" \
+                     || { echo "STOP: sync canonical -> published before running"; exit 1; }
+fi
+```
+
+**Compare with `diff --strip-trailing-cr`, never `cmp`.** Both repos are `core.autocrlf=true` with no `.gitattributes`: git stores LF and checkout writes CRLF, so a working-tree file is LF or CRLF depending purely on whether it arrived via `git checkout` or via a copy — and **git calls both clean**. A byte-exact `cmp` therefore reports DRIFT on files whose content is identical, and a check that cries wolf gets ignored, which is worse than no check. This was caught by testing the check rather than trusting it (2026-07-16): `git checkout -- wt_lookup.py` restored it as CRLF (993 bytes vs canonical's 966), and the first draft of this guard duly failed on a file that had not changed at all.
+
+**Never let an install artifact shadow the source on a maintainer machine.** `install.sh` writes `~/.claude/commands/cleanup.md` and `~/.claude/cleanup-scripts/`. A user-level command **outranks the project junction**, so those downloads win over `claude-config` even though the junction is the intended path. On this workstation both were removed on 2026-07-16: the command copy is deleted (the junction now loads), and `~/.claude/cleanup-scripts` is a **directory junction** to `claude-config/scripts/windows/cleanup`, so it cannot drift. If `/cleanup` ever stops being available outside the workspace, that is why — restore it by re-running `install.sh`, and accept that you are then running a snapshot, not the source.
+
+**Why this is a hard stop and not a warning** (2026-07-16): the machine had been running a **26 June** download for three weeks. Its `find_targets.py` was missing `backs_mcp_server()` — the code filter that keeps live-MCP-server `node_modules` out of the candidate list, added 29 June *after* two book-power MCPs broke with `-32000` when a cleanup wiped their deps. The published `claude-cleanup` repo was stale too, so the download was a faithful copy of a stale source: **anyone who installed `/cleanup` got a tool missing its own safety fix.** Compounding it, the workspace-root walk-up (see the nested-`.claude` bug) mis-resolved `$root`, which is exactly what makes the resolver fall through candidates 1 and 2 to the installed copy at candidate 3. A stale copy plus a mis-scoped root silently disables a safety filter — and the only thing that prevented a repeat of 29 June was the user not picking that category.
+
 | Script | Purpose |
 |--------|---------|
 | `wt_lookup.py <csv>` | Size lookup — pipe Windows paths on stdin → `sizeMB\|path` |

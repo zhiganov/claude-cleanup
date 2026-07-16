@@ -16,6 +16,8 @@ inactivity -- the skill applies the git-recency filter per project afterward, an
 handles `dist/` separately (only when gitignored).
 """
 import csv
+import json
+import os
 import sys
 
 BS = chr(92)
@@ -23,6 +25,38 @@ csv_path = sys.argv[1]
 root = sys.argv[2].replace('/', BS).rstrip(BS).lower()
 nm = BS + 'node_modules'
 ARTIFACTS = ('.next', '.turbo', '.parcel-cache', '.vite')
+
+
+def _mcp_entry_paths():
+    """Lowercased file paths from every registered stdio MCP server's `args`
+    in ~/.claude.json. A node_modules whose parent dir contains one of these
+    backs a LIVE MCP server, so it must never be reclaimed -- the project may
+    have no recent git activity but the deps are required for the server to
+    start. (Book-power MCPs broke with -32000 after a cleanup wiped their
+    node_modules, 2026-06-29.)"""
+    out = []
+    try:
+        with open(os.path.expanduser('~/.claude.json'), encoding='utf-8') as fh:
+            cfg = json.load(fh)
+    except Exception:
+        return out
+    blocks = [cfg.get('mcpServers') or {}]
+    for proj in (cfg.get('projects') or {}).values():
+        blocks.append((proj or {}).get('mcpServers') or {})
+    for block in blocks:
+        for srv in block.values():
+            for a in (srv or {}).get('args') or []:
+                if isinstance(a, str):
+                    out.append(a.replace('/', BS).lower())
+    return out
+
+
+_MCP_PATHS = _mcp_entry_paths()
+
+
+def backs_mcp_server(server_dir_lower):
+    """True if a registered MCP server's entry file lives under this dir."""
+    return any(ap.startswith(server_dir_lower + BS) for ap in _MCP_PATHS)
 
 nm_rows = []
 art_rows = []
@@ -40,7 +74,7 @@ with open(csv_path, encoding='utf-8-sig') as f:
             continue
         if pl.endswith(nm):
             inner = pl[:-len(nm)]
-            if 'node_modules' not in inner:
+            if 'node_modules' not in inner and not backs_mcp_server(inner):
                 nm_rows.append((mb, p))
         else:
             base = pl.rsplit(BS, 1)[-1]
