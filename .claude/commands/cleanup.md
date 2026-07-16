@@ -607,15 +607,26 @@ Collect: size.
 
 When apps are uninstalled, their data directories in `%APPDATA%` and `%LOCALAPPDATA%` often remain. Detect orphaned directories by cross-referencing against installed programs.
 
-Run the committed `appdata_orphans.ps1` (see *Helper scripts*): `powershell.exe -NoProfile -File "$(cygpath -w "$CLEANUP_SCRIPTS/appdata_orphans.ps1")"`. It cross-references `%APPDATA%`/`%LOCALAPPDATA%` dirs against installed programs (registry), applies a system-dir skiplist, and emits orphans > 50 MB as `dirName|sizeMB|fullPath`.
+Run the committed `appdata_orphans.ps1` (see *Helper scripts*): `powershell.exe -NoProfile -File "$(cygpath -w "$CLEANUP_SCRIPTS/appdata_orphans.ps1")"`. It emits orphans > 50 MB as `dirName|sizeMB|fullPath`. Add `-Explain` to get a per-directory keep/skip reason on **stderr** (stdout stays parseable) — use it whenever a result looks surprising.
+
+**It applies the same 4-layer filter chain as the Linux orphan scan** (ported 2026-07-16), cheapest first:
+
+1. **Allowlist** — system dirs, the dev-tool surface (`npm-cache`, `pnpm`, `uv`, `node-gyp`, `bun`, `cargo`, …), and **anything that is another category's target**, excluded by construction.
+2. **Active binary** — `Get-Command <dirname>` resolves ⇒ live tool on PATH.
+3. **Package match** — registry DisplayName at a **token boundary**, never substring, after normalising the dir name (strip a leading `@`, strip `-updater`/`-helper`/`-cache` suffixes, apply the alias map). Plus a **liberal prefix rule**: Windows DisplayNames append the version (`Linear 1.29.5`), so the first token is the app name and `lineardesktop` → `linear` is a correct skip. Direction is `dir.StartsWith(pkg)`, so the Linux `zenity`-swallows-`zen` case can't occur.
+4. **Recent activity** — any file modified in 30 days ⇒ not abandoned. Bails on first hit.
+
+**Errors here are not symmetric — bias toward skipping.** A false positive offers live data for deletion and trains the user to click through the per-item confirmation that is their only protection; a false negative merely leaves disk unreclaimed. When unsure, skip.
 
 **With WizTree:** Instead of measuring each directory with `Get-ChildItem`, pipe discovered orphan paths to `wt_lookup.py`.
 
 Parse output. Each line is: `dirName|sizeMB|fullPath`
 
-Skip if no orphans found or total < 100 MB.
+Skip if no orphans found or total < 100 MB. **Zero orphans is a normal, healthy result** — this scan reported 0 on a 40-project workstation after the port. Do not loosen the filters to make the category produce rows.
 
 **IMPORTANT:** This category requires user confirmation per-item during cleanup. Present the list of detected orphans and let the user confirm which to delete — false positives are possible (portable apps, manually installed tools). Never auto-delete orphaned AppData directories.
+
+*Why the chain exists* (2026-07-16): before the port this scan had **one** layer — an exact-match skiplist plus a substring registry test — and every hit was wrong. `npm-cache` (1058 MB), `pnpm`, `uv`, `node-gyp`, `RealtimeBoard` (Miro, installed and running) and `CrashDumps` — **6 of 6 false positives**. The skiplist held `npm` and `node.js`, but the test was `-eq`, so `npm-cache` and `node-gyp` sailed straight through. Sharpest of all: it offered `npm-cache`, the one directory the `_npx` rule says must never be whole-dir deleted. A category where every row is wrong is worse than no category — the per-item confirmation that "saves" it is exactly what it erodes.
 
 Clean command (Step 6): `rm -rf <each confirmed orphan path>` — only after user confirms the specific items.
 
