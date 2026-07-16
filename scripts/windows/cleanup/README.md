@@ -24,6 +24,7 @@ hardcode a `/tmp/...` path inside a script.
 | `appdata_orphans.ps1` | `powershell.exe -NoProfile -File appdata_orphans.ps1` | Orphaned `%APPDATA%`/`%LOCALAPPDATA%` dirs |
 | `winsdk.ps1` | `powershell.exe -NoProfile -File winsdk.ps1` | Old side-by-side Windows SDK versions |
 | `vs_orphans.ps1` | `powershell.exe -NoProfile -File vs_orphans.ps1` | Orphaned Visual Studio installs |
+| `assert_list.py` | `python assert_list.py <list> --require 'L=SUB' --forbid 'L=SUB'` | **Gate before `scrub.ps1`** — buckets the list; fails on a missing/forbidden/unclassified/empty entry |
 | `scrub.ps1` | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scrub.ps1 -ListFile <file>` | Hook-safe batch deleter (one path per line) |
 
 **Hook-safe deletion.** `scrub.ps1` exists because this workstation's path-protection

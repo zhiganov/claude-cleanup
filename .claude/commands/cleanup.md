@@ -74,6 +74,7 @@ fi
 | `run_wiztree.ps1 -WizTree <exe> -OutCsv <winpath>` | Elevated WizTree MFT export (one UAC) |
 | `squirrel.ps1` | Discover Squirrel old `app-*` versions |
 | `appdata_orphans.ps1` / `winsdk.ps1` / `vs_orphans.ps1` | Windows orphan / old-version discovery |
+| `assert_list.py <list> --require L=SUB --forbid L=SUB` | **Gate before `scrub.ps1`** — buckets the list, fails on a missing/forbidden/unclassified entry |
 | `scrub.ps1 -ListFile <file>` | Hook-safe batch deleter (one path per line) |
 
 PowerShell helpers: `powershell.exe -NoProfile -File "$(cygpath -w "$CLEANUP_SCRIPTS/<name>.ps1")" …`. Python helpers: `python "$CLEANUP_SCRIPTS/<name>.py" …`. Always pass the CSV path and workspace root as **command-line arguments** (MSYS converts those). If `$CLEANUP_SCRIPTS` can't be resolved, fall back to each category's per-path PowerShell/`du` sizing — but the committed files are the supported path; do not re-author them inline.
@@ -1019,6 +1020,22 @@ For each selected category, execute the appropriate cleanup.
 The `find -delete` form is at least as safe (it errors on typos rather than recursing) and doesn't trigger the hook pattern. The table below shows the `rm -rf` form for readability — translate before running on Linux/macOS if a safety hook is installed.
 
 **Hook-safe deletion (Windows):** This workstation has a path-protection PreToolUse hook that blocks inline `Remove-Item` and `cmd /c rmdir /s /q` targeting `%LOCALAPPDATA%` / `%USERPROFILE%` / system paths ("Remove-Item on system path … is blocked"; it even misparses flags like `/s` as a path), and a block aborts the **whole** command so nothing in it runs. The committed **`scrub.ps1`** (see *Helper scripts*) is the supported path: write the target paths (one per line) to a list file, then `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$CLEANUP_SCRIPTS/scrub.ps1")" -ListFile "$(cygpath -w <listfile>)"`. The launcher carries no delete keywords so the hook passes; `scrub.ps1` reports `OK`/`PARTIAL`/`FAIL`/`SKIP` per path and uses `rmdir /s /q` for dir trees. User-owned targets (node_modules, `%LOCALAPPDATA%` app caches, the scratch dir) need no elevation this way; only `C:\Windows\*` paths need the elevated variant below.
+
+**Filter paths with `grep -F`, never bare `grep`.** Windows paths are backslash-laden and every regex-flavoured tool reads a backslash as an escape. `grep -v '\Claude\'` does not exclude Claude — it **errors** with `grep: Trailing backslash` and matches nothing, and when the output is redirected the exit status is lost, so it appends nothing and looks fine. Use `grep -vF` / `grep -cF` (fixed-string) for **all** path filtering. The same trap has a Python cousin: `r'\Claude\'` is a SyntaxError (a raw string cannot end in a backslash) — use `chr(92)` to build the separator, and pass paths as **argv** so MSYS converts them (a `/tmp/...` literal inside a script is not converted).
+
+**Assert the list with `assert_list.py` before every `scrub.ps1` call. Never delete off an unverified list.**
+
+```bash
+python "$CLEANUP_SCRIPTS/assert_list.py" "$(cygpath -w <listfile>)" \
+  --require 'electron cache=\AppData\Roaming\' \
+  --require 'user temp=\AppData\Local\Temp\' \
+  --forbid  'Claude cache=\Claude\' \
+  --forbid  'CC scratch=\Temp\claude\'   || exit 1
+```
+
+One `--require` per category the user selected, one `--forbid` per thing you excluded by hand. It fails on a require bucket matching **0** lines, on any forbid hit, on an empty list, and on any line matching no bucket. **A selected category showing `0` is a bug, not a clean bill of health** — that is the whole point.
+
+*Why a committed script and not an inline check* (2026-07-16): the run **did** verify, and the verification was broken **the same way as the bug**. `grep -v '\Claude\'` silently appended nothing, so the entire Electron category — 42 dirs, ~1.4 GB, the largest selection — vanished from the delete list while `wc -l` reported a healthy 197 lines. The check `grep -c 'AppData\Roaming' "$LIST"` then died on the identical trailing backslash and printed `0` next to a "must be 0" row for a *different* category, so the wrong answer read as a passing test. A check that fails identically to the thing it checks is worse than no check. `assert_list.py` matches fixed-string off argv, in code, and is regression-tested against that exact 197-line list.
 
 **NEVER pass `npm-cache` to `scrub.ps1`.** `%LOCALAPPDATA%\npm-cache\_npx\` is where `npx -y <pkg>` materialises packages, and **live MCP servers execute from inside it** — on a machine running Claude Code you will typically find `node …\npm-cache\_npx\…\harmonica-mcp\dist\index.js` (and context7, shadcn, etc.) in the process list, once per running session. A whole-directory `rmdir /s /q` deletes those servers' code out from under every running session. Use **`npm cache clean --force`** (Step 6 table) — it prunes `_cacache` and leaves `_npx` intact. It is slower, and that is the price. Observed 2026-07-16: `scrub.ps1` on npm-cache returned `FAIL: Access to the path is denied` **because** two sessions' MCP servers held it open; the lock was the only thing preventing the damage. Do not "fix" that failure by retrying harder or killing the holder. This is the same failure class as the live-MCP-server rule in the node_modules category — `_npx` is its `%LOCALAPPDATA%` twin. If you must hand-roll a delete script instead, write it with the Write tool (not a shell heredoc) so its delete commands never hit the hook, and never name the worker function `Del`/`RD`/`RM`.
 
